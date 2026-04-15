@@ -2,19 +2,28 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/go .
 {
 	"name": "Go",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "mcr.microsoft.com/devcontainers/go:2-1.26-trixie",
 	"features": {
 		"ghcr.io/navinkrishnan/devcontainer-features-btp/helm:1": {}
-	}
-	// Features to add to the dev container. More info: https://containers.dev/features.
-	// "features": {},
-	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
-	// Use 'postCreateCommand' to run commands after the container is created.
-	// "postCreateCommand": "go version",
-	// Configure tool-specific properties.
-	// "customizations": {},
-	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-	// "remoteUser": "root"
+	},
+	// The base image ships /go as GOPATH owned by root, which breaks
+	// `go get` / `go mod download` for the vscode user. Relocate everything
+	// into the user's home so the caches are writable and survive rebuilds
+	// via the named volumes below.
+	"containerEnv": {
+		"GOPATH": "/home/vscode/go",
+		"GOMODCACHE": "/home/vscode/go/pkg/mod",
+		"GOCACHE": "/home/vscode/.cache/go-build",
+		"GOFLAGS": "-mod=mod"
+	},
+	"remoteEnv": {
+		"PATH": "/home/vscode/go/bin:${containerEnv:PATH}"
+	},
+	"mounts": [
+		"source=spam-operator-gomod,target=/home/vscode/go/pkg/mod,type=volume",
+		"source=spam-operator-gocache,target=/home/vscode/.cache/go-build,type=volume"
+	],
+	// Named volumes are created root-owned; chown them on first start so
+	// the vscode user can actually write into them.
+	"postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/go /home/vscode/.cache/go-build && go env -w GOPATH=/home/vscode/go GOMODCACHE=/home/vscode/go/pkg/mod GOCACHE=/home/vscode/.cache/go-build && go mod download"
 }
