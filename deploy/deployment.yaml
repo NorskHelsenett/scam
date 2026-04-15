@@ -26,6 +26,8 @@ spec:
           image: git.torden.tech/jonasbg/spam-operator:latest
           imagePullPolicy: Always
           env:
+            - name: CLUSTER_NAME
+              value: "talos-proxmox-cluster"
             - name: GOGC
               value: "50"
             - name: GOMEMLIMIT

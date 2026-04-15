@@ -15,7 +15,22 @@ metadata:
   name: spam-operator
 rules:
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  # Permissions for Gateway API resources are declared proactively. If the
+  # CRDs aren't installed, the operator's discovery probe skips the watchers
+  # and these rules are harmless.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources:
+      - gateways
+      - gatewayclasses
+      - httproutes
+      - grpcroutes
+      - tlsroutes
+      - tcproutes
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
