@@ -95,11 +95,18 @@ func statusImageID(list []corev1.ContainerStatus, name string) string {
 	return ""
 }
 
-// samePodImages reports whether two Pods' container specs and resolved
-// imageIDs are identical — the only facts emitPod actually emits. Lets us
-// short-circuit pod status churn (IP flips, condition ticks, etc.) without
-// allocating collectContainers + its prev map.
+// samePodImages reports whether two Pods' signatures — the facts emitPod
+// actually emits — are identical. Short-circuits pod status churn (IP flips,
+// condition ticks) without allocating collectContainers + its prev map.
+//
+// Pod.Status.Phase is in the fingerprint so Running → Succeeded/Failed
+// transitions still emit an UPDATE even when containers are otherwise
+// unchanged — otherwise spam would never see a Job pod leave the "running"
+// set until its eventual DELETE.
 func samePodImages(a, b *corev1.Pod) bool {
+	if a.Status.Phase != b.Status.Phase {
+		return false
+	}
 	if len(a.Spec.InitContainers) != len(b.Spec.InitContainers) ||
 		len(a.Spec.Containers) != len(b.Spec.Containers) ||
 		len(a.Spec.EphemeralContainers) != len(b.Spec.EphemeralContainers) {
@@ -161,8 +168,13 @@ func emitPod(event string, p, oldP *corev1.Pod) int {
 	}
 	ok, on := podOwner(p)
 	cur := collectContainers(p)
+	// Pod-level fields (phase, labels) are stamped on every container record.
+	// When they change, per-container dedup must NOT suppress — otherwise a
+	// Running → Succeeded transition emits zero records because images are
+	// unchanged and the inner skip check fires on every container.
+	phaseChanged := oldP != nil && oldP.Status.Phase != p.Status.Phase
 	var prev map[string]containerRef
-	if oldP != nil {
+	if oldP != nil && !phaseChanged {
 		old := collectContainers(oldP)
 		prev = make(map[string]containerRef, len(old))
 		for _, c := range old {
@@ -188,6 +200,7 @@ func emitPod(event string, p, oldP *corev1.Pod) int {
 			"cluster", cluster,
 			"namespace", p.Namespace,
 			"pod_uid", string(p.UID),
+			"pod_phase", string(p.Status.Phase),
 			"owner_kind", ok,
 			"owner", on,
 			"pod", p.Name,
