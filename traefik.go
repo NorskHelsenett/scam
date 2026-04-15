@@ -173,6 +173,18 @@ func traefikBackends(u *unstructured.Unstructured) []backendTarget {
 	return out
 }
 
+// emitTraefikDelete emits a compact DELETE record for any Traefik route kind.
+func emitTraefikDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
+	log.Info("DELETE",
+		"kind", traefikKindFromResource(gvr.Resource),
+		"api_version", gvr.GroupVersion().String(),
+		"cluster", cluster,
+		"uid", string(u.GetUID()),
+		"namespace", u.GetNamespace(),
+		"name", u.GetName(),
+	)
+}
+
 func traefikKindFromResource(r string) string {
 	switch r {
 	case "ingressroutes":

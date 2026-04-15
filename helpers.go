@@ -8,13 +8,19 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// onAddUpdate registers Add + Update handlers on inf that gate on synced
-// (dropping events during the initial sync window), type-assert to T, and
-// dispatch through fn. fn receives the event name ("ADD" / "UPDATE") plus
-// the new object and, on UPDATE, the previous one (nil-valued T on ADD).
+// onEvents registers Add, Update, and Delete handlers on inf that gate on
+// synced (dropping events during the initial sync window), type-assert to T,
+// and dispatch through the callbacks. addUpdate receives the event name
+// ("ADD" / "UPDATE") plus the new object and, on UPDATE, the previous one
+// (zero T on ADD). del receives the deleted object, unwrapping the
+// DeletedFinalStateUnknown tombstone client-go wraps stale deletes in.
 //
-// Delete is intentionally absent — the collector is a forward-only stream.
-func onAddUpdate[T any](inf cache.SharedIndexInformer, synced *atomic.Bool, fn func(event string, newObj, oldObj T)) {
+// DELETE is load-bearing for spam's "what's running NOW" view: without it
+// the consumer has to rely on a soft-TTL and lags reality by hours.
+func onEvents[T any](inf cache.SharedIndexInformer, synced *atomic.Bool,
+	addUpdate func(event string, newObj, oldObj T),
+	del func(T),
+) {
 	var zero T
 	_, _ = inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
@@ -22,7 +28,7 @@ func onAddUpdate[T any](inf cache.SharedIndexInformer, synced *atomic.Bool, fn f
 				return
 			}
 			if t, ok := obj.(T); ok {
-				fn("ADD", t, zero)
+				addUpdate("ADD", t, zero)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj any) {
@@ -34,9 +40,36 @@ func onAddUpdate[T any](inf cache.SharedIndexInformer, synced *atomic.Bool, fn f
 				return
 			}
 			oldT, _ := oldObj.(T)
-			fn("UPDATE", newT, oldT)
+			addUpdate("UPDATE", newT, oldT)
+		},
+		DeleteFunc: func(obj any) {
+			if !synced.Load() {
+				return
+			}
+			t, ok := extractDeleted[T](obj)
+			if !ok {
+				return
+			}
+			del(t)
 		},
 	})
+}
+
+// extractDeleted unwraps the object from a raw informer delete event. When
+// the informer fell behind the apiserver and missed the watch-delete, it
+// wraps the last-known object in DeletedFinalStateUnknown. The inner object
+// may be slightly stale but its UID and key fields are stable.
+func extractDeleted[T any](obj any) (T, bool) {
+	if t, ok := obj.(T); ok {
+		return t, true
+	}
+	if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		if t, ok := tomb.Obj.(T); ok {
+			return t, true
+		}
+	}
+	var zero T
+	return zero, false
 }
 
 // dumpSorted emits the initial snapshot for a single kind: sort, walk, emit,

@@ -206,7 +206,49 @@ func emitPod(event string, p, oldP *corev1.Pod) int {
 	return emitted
 }
 
+// emitPodDelete emits one Container DELETE per container in the pod, mirroring
+// the shape of ADD/INITIAL/UPDATE records so spam's handler has a uniform path.
+// Core identity fields only — labels and image details are omitted (spam has
+// them from prior ADD/INITIAL under the same pod_uid).
+func emitPodDelete(p *corev1.Pod) {
+	ok, on := podOwner(p)
+	uid := string(p.UID)
+	for _, c := range p.Spec.InitContainers {
+		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "init", c.Name)
+	}
+	for _, c := range p.Spec.Containers {
+		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "main", c.Name)
+	}
+	for _, c := range p.Spec.EphemeralContainers {
+		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "ephemeral", c.Name)
+	}
+}
+
+func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname string) {
+	log.Info("DELETE",
+		"kind", "Container",
+		"cluster", cluster,
+		"namespace", ns,
+		"pod_uid", podUID,
+		"owner_kind", ownerKind,
+		"owner", ownerName,
+		"pod", podName,
+		"container_kind", ckind,
+		"container", cname,
+	)
+}
+
 // ---------- Services ------------------------------------------------------
+
+func emitServiceDelete(s *corev1.Service) {
+	log.Info("DELETE",
+		"kind", "Service",
+		"cluster", cluster,
+		"uid", string(s.UID),
+		"namespace", s.Namespace,
+		"name", s.Name,
+	)
+}
 
 type svcPort struct {
 	Name       string `json:"name,omitempty"`
@@ -313,6 +355,16 @@ func derefStr(p *string) string {
 
 // ---------- Ingress -------------------------------------------------------
 
+func emitIngressDelete(i *networkingv1.Ingress) {
+	log.Info("DELETE",
+		"kind", "Ingress",
+		"cluster", cluster,
+		"uid", string(i.UID),
+		"namespace", i.Namespace,
+		"name", i.Name,
+	)
+}
+
 type ingPath struct {
 	Path        string `json:"path,omitempty"`
 	PathType    string `json:"path_type,omitempty"`
@@ -394,6 +446,15 @@ func emitIngress(event string, i *networkingv1.Ingress) {
 }
 
 // ---------- IngressClass --------------------------------------------------
+
+func emitIngressClassDelete(ic *networkingv1.IngressClass) {
+	log.Info("DELETE",
+		"kind", "IngressClass",
+		"cluster", cluster,
+		"uid", string(ic.UID),
+		"name", ic.Name,
+	)
+}
 
 func dumpIngressClasses(inf netinformers.IngressClassInformer) {
 	list, err := inf.Lister().List(labels.Everything())

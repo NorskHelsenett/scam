@@ -124,6 +124,20 @@ func emitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructur
 	}
 }
 
+// emitGatewayAPIDelete emits a compact DELETE record for any Gateway API
+// resource. GatewayClass is cluster-scoped; everything else is namespaced,
+// but slog elides empty strings so the same call site works for both.
+func emitGatewayAPIDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
+	log.Info("DELETE",
+		"kind", kindFromResource(gvr.Resource),
+		"api_version", gvr.GroupVersion().String(),
+		"cluster", cluster,
+		"uid", string(u.GetUID()),
+		"namespace", u.GetNamespace(),
+		"name", u.GetName(),
+	)
+}
+
 // ---------- Gateway -------------------------------------------------------
 
 type gwListener struct {
