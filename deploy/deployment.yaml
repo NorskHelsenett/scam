@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spam-operator
+  namespace: spam-operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: spam-operator
+  template:
+    metadata:
+      labels:
+        app: spam-operator
+    spec:
+      serviceAccountName: spam-operator
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: spam-operator
+          image: git.torden.tech/jonasbg/spam-operator:latest
+          imagePullPolicy: Always
+          env:
+            - name: GOGC
+              value: "50"
+            - name: GOMEMLIMIT
+              value: "96MiB"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

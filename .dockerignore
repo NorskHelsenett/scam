@@ -1,0 +1,11 @@
+.git
+.gitignore
+.devcontainer
+deploy
+Dockerfile
+.dockerignore
+README*
+*.md
+/bin
+/dist
+*.test

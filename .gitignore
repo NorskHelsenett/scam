@@ -1,0 +1,6 @@
+/spam-operator
+/bin/
+/dist/
+*.test
+*.out
+.vscode/
