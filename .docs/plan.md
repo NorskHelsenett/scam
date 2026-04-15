@@ -166,15 +166,33 @@ reachable, and fall back to admin approval for the ones that aren't.
 See [`spam.md`](spam.md) for the full schema contract. The new pieces
 implied by this plan:
 
-**Tables**
+**Storage model — JSONB-first**
 
-- `clusters` — one row per observed cluster. `status ∈ pending | approved |
-  rejected | archived`. Identity claim (`iss`, `sub`), last seen, notes.
-- `cluster_tokens` — per-cluster bearer token (hashed). Issued on approval,
-  rotatable.
-- `pods`, `pod_containers`, `cluster_ingresses`, `cluster_services`,
-  `cluster_routes`, `cluster_gateways` — as described in `spam.md`.
-- Extend `image_digests`: add `oci_labels` JSONB + `repo_binding_id` FK.
+Decision: store the raw agent stream as-is in one append-only JSONB
+table; express everything else as **views**. Avoids migrations every time
+the agent adds a field, and keeps the audit trail free. Performance
+tactics (indexes, partitioning, materialised views, app-level cache) are
+detailed in [`spam.md`](spam.md) §9.
+
+**Normalised tables (only three, only where FKs matter)**
+
+- `ingest_events` — append-only, partitioned by month. `(cluster_id,
+  kind, event, uid, record jsonb, received_at)` with a btree on
+  `(cluster_id, kind, uid, received_at DESC)` and a GIN on
+  `record jsonb_path_ops`.
+- `clusters` — one row per observed cluster. `status ∈ pending |
+  approved | offline | archived`. Claimed `iss` + `sub` captured on
+  first contact.
+- `cluster_tokens` — per-cluster bearer token (hashed). Issued on
+  approval, rotatable.
+- Extend existing `image_digests`: `oci_labels JSONB` +
+  `repo_binding_id` FK to `repos`.
+
+No `pods`, no `pod_containers`, no `cluster_ingresses`, no per-route
+table. Those are views: `current_containers`, `current_services`,
+`current_ingresses`, `current_routes`, `current_gateways`, `running_now`
+(the filtered view spam's "what's running NOW" surface reads). See
+[`spam.md`](spam.md) §2.
 
 **Endpoints**
 
@@ -221,27 +239,36 @@ Bite-sized, each step shippable on its own:
 2. **Agent heartbeat**: goroutine, 60s tick, `{cluster, summary counts}`.
 3. **Agent NetworkPolicy**: default-deny + egress to spam only + DNS +
    kube-apiserver.
-4. **spam schema**: `clusters`, `cluster_tokens`, `pods`, `pod_containers`,
-   `cluster_ingresses`. Extend `image_digests`.
-5. **spam ingest**: `/api/ingest/agent/records` + heartbeat + pending
-   flow (rate-limited, auto-create rows, admin notify).
-6. **spam admin approval**: `/app/admin/clusters` page, approval action,
+4. **spam schema**: `clusters`, `cluster_tokens`, `ingest_events`
+   (partitioned by month, btree + GIN indexes). Extend `image_digests`.
+5. **spam ingest**: `/api/ingest/agent/records` + heartbeat. Insert into
+   `ingest_events`. Auto-create `pending` cluster rows on unknown `iss`.
+   Rate-limit aggressively.
+6. **spam views**: `current_containers`, `current_services`,
+   `current_ingresses`, `current_routes`, `current_gateways`,
+   `running_now` — plain views first, materialise later if needed.
+7. **spam admin approval**: `/app/admin/clusters` page, approval action,
    token issuance.
-7. **spam `OCI_LABEL_RESOLVE` worker**: extend `image_digests.oci_labels` +
-   `repo_binding_id`.
-8. **spam cluster detail page**: `/app/clusters/{name}` with deployments
-   tree + exposure panel.
-9. **spam "Deployed to" panel on repo detail**: the first user-visible
-   payoff — "where does this repo run?".
-10. **spam GC cron**: cluster offline/archive transitions.
-11. **spam reconcile marker on agent restart** (belt for suspenders).
+8. **spam trigger + `OCI_LABEL_RESOLVE` worker**: `AFTER INSERT` trigger
+   enqueues a job for unknown digests; worker writes
+   `image_digests.oci_labels` + `repo_binding_id`.
+9. **spam cluster detail page**: `/app/clusters/{name}` reads from
+   `current_*` views.
+10. **spam "Deployed to" panel on repo detail**: the first user-visible
+    payoff — "where does this repo run?". Joins `repos` → `image_digests`
+    → `current_containers`.
+11. **spam GC cron**: cluster offline/archive transitions. Partition
+    rotation cron for `ingest_events`.
+12. **spam materialised views + refresh**: promote hot views (starting
+    with `running_now`) when plain views start costing. See
+    [`spam.md`](spam.md) §9 for the refresh decision tree.
 
 Later (not this rollout):
 
-- Service / route / gateway ingest tables → exposure-graph view.
-- `IMAGE_SBOM_GENERATE` / `IMAGE_SECRET_SCAN` job types.
+- `IMAGE_SBOM_GENERATE` / `IMAGE_SECRET_SCAN` job types per digest.
 - Public-vs-local IP classification rules.
 - Cosign image signature verification on the agent side.
+- Parquet export of old `ingest_events` partitions to cold storage.
 - JWKS verification when spam can network-reach the cluster API server.
 
 ## Open questions
@@ -277,11 +304,16 @@ Later (not this rollout):
 
 - Agent is done and running. Stream is clean: ADD / UPDATE / DELETE,
   every record UID-keyed, pod phase tracked for "running NOW" queries,
-  image ground-truth preserved in `image_spec` + `image_id`.
+  image ground-truth preserved in `image_spec` + `image_id`. Renamed
+  from spam-operator to spam-agent — it's a collector, not a controller.
 - Auth model: projected SA JWT as identity hint, admin approval gate,
   per-cluster token post-approval. Layered mitigations for endpoint hijack
   acknowledge that first-contact can't be cryptographically bulletproof
   without extra infrastructure.
+- Storage model: JSONB-first. Three real tables (`clusters`,
+  `cluster_tokens`, `ingest_events`) + extended `image_digests`.
+  Everything else is a view. Performance via indexes, partitioning,
+  materialised views for hot paths, app-level cache for digest → labels.
 - Rollout is sequenced so each step ships a user-visible bit of value.
 - Major open question before shipping is how per-cluster tokens get back
   into the cluster post-approval — solvable, just needs a call.
