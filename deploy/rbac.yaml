@@ -1,18 +1,18 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: spam-operator
+  name: spam-agent
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: spam-operator
-  namespace: spam-operator
+  name: spam-agent
+  namespace: spam-agent
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: spam-operator
+  name: spam-agent
 rules:
   - apiGroups: [""]
     resources: ["pods", "services"]
@@ -21,7 +21,7 @@ rules:
     resources: ["ingresses", "ingressclasses"]
     verbs: ["get", "list", "watch"]
   # Permissions for Gateway API resources are declared proactively. If the
-  # CRDs aren't installed, the operator's discovery probe skips the watchers
+  # CRDs aren't installed, the agent's discovery probe skips the watchers
   # and these rules are harmless.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources:
@@ -32,7 +32,7 @@ rules:
       - tlsroutes
       - tcproutes
     verbs: ["get", "list", "watch"]
-  # Traefik's own CRDs for HTTP/TCP/UDP routing. The operator probes for the
+  # Traefik's own CRDs for HTTP/TCP/UDP routing. The agent probes for the
   # current "traefik.io" and legacy "traefik.containo.us" groups.
   - apiGroups: ["traefik.io", "traefik.containo.us"]
     resources:
@@ -44,12 +44,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: spam-operator
+  name: spam-agent
 subjects:
   - kind: ServiceAccount
-    name: spam-operator
-    namespace: spam-operator
+    name: spam-agent
+    namespace: spam-agent
 roleRef:
   kind: ClusterRole
-  name: spam-operator
+  name: spam-agent
   apiGroup: rbac.authorization.k8s.io

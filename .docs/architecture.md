@@ -38,7 +38,7 @@ Target: single-digit MiB RSS on a normal cluster.
    the life of the process. Informer cache entries shrink by ~60–80%.
 2. **Resync period `0`** — no periodic relists. Watch events are the
    only change signal.
-3. **No parallel cache.** The operator owns zero maps/sets of its own.
+3. **No parallel cache.** The agent owns zero maps/sets of its own.
    All lookups go through the informer caches.
 4. **`GOMEMLIMIT=96MiB` + `GOGC=50`** keep the Go runtime conservative.
 5. **Scratch base image + `-trimpath -ldflags='-s -w'`** so we start
@@ -47,7 +47,7 @@ Target: single-digit MiB RSS on a normal cluster.
 ## The exposure-chain filter
 
 Services of `type: ClusterIP` are cluster-internal noise unless they
-back an externally-exposed thing. The operator drops them at emit time
+back an externally-exposed thing. The agent drops them at emit time
 unless at least one of these is true:
 
 - An `Ingress` in the same namespace has a `backend.service.name` match.

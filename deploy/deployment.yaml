@@ -1,29 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: spam-operator
-  namespace: spam-operator
+  name: spam-agent
+  namespace: spam-agent
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: spam-operator
+      app: spam-agent
   template:
     metadata:
       labels:
-        app: spam-operator
+        app: spam-agent
     spec:
-      serviceAccountName: spam-operator
+      serviceAccountName: spam-agent
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: spam-operator
-          image: git.torden.tech/jonasbg/spam-operator:latest
+        - name: spam-agent
+          image: git.torden.tech/jonasbg/spam-agent:latest
           imagePullPolicy: Always
           env:
             - name: CLUSTER_NAME

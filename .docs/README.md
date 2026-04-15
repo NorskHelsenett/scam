@@ -1,4 +1,4 @@
-# spam-operator
+# spam-agent
 
 One-sentence: a cluster-wide Kubernetes watcher that emits structured JSON
 records describing pods, images, and the ingress/gateway exposure graph, for
@@ -12,20 +12,20 @@ ingestion by [`NorskHelsenett/spam`](https://github.com/NorskHelsenett/spam).
   public-vs-private IPs, does not resolve OCI image labels, does not talk
   to registries. That all lives in `spam`.
 - **Multi-cluster aware.** Every record is stamped with a `cluster` name
-  (from the `CLUSTER_NAME` env var). One operator instance per cluster.
+  (from the `CLUSTER_NAME` env var). One agent instance per cluster.
 
 ## Why it exists
 
 `spam` wants to bind git repos to clusters and map the live exposure
 surface (what FQDN reaches what pod running what image digest) so it can
-pull in SBOMs / CVEs / secret-scan results per digest. The operator is
+pull in SBOMs / CVEs / secret-scan results per digest. The agent is
 the metadata pump feeding that system.
 
 ## Docs
 
 | File | For whom |
 |---|---|
-| [`architecture.md`](architecture.md) | Maintaining this operator — design choices, memory strategy, how to add a new watcher |
+| [`architecture.md`](architecture.md) | Maintaining this agent — design choices, memory strategy, how to add a new watcher |
 | [`records.md`](records.md) | Consumers of the log stream — schema and examples for every emitted record kind |
 | [`spam.md`](spam.md) | Implementers on the `spam` side — what needs to be built to turn this stream into a graph |
 | [`operations.md`](operations.md) | Deploying, configuring, observing, upgrading |

@@ -709,7 +709,7 @@ func colonAfter(s string, from int) int {
 //
 //	docker.io/library/postgres             -> registry=docker.io,        image=postgres
 //	docker.io/vaultwarden/server           -> registry=docker.io,        image=vaultwarden/server
-//	git.torden.tech/jonasbg/spam-operator  -> registry=git.torden.tech,  image=jonasbg/spam-operator
+//	git.torden.tech/jonasbg/spam-agent  -> registry=git.torden.tech,  image=jonasbg/spam-agent
 //	git.torden.tech/jonasbg/spam/trivy-... -> registry=git.torden.tech,  image=jonasbg/spam/trivy-scanner
 //	quay.io/argoproj/argocd                -> registry=quay.io,          image=argoproj/argocd
 //	docker.io/traefik                      -> registry=docker.io,        image=traefik

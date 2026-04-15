@@ -20,8 +20,8 @@
 		"PATH": "/home/vscode/go/bin:${containerEnv:PATH}"
 	},
 	"mounts": [
-		"source=spam-operator-gomod,target=/home/vscode/go/pkg/mod,type=volume",
-		"source=spam-operator-gocache,target=/home/vscode/.cache/go-build,type=volume"
+		"source=spam-agent-gomod,target=/home/vscode/go/pkg/mod,type=volume",
+		"source=spam-agent-gocache,target=/home/vscode/.cache/go-build,type=volume"
 	],
 	// Named volumes are created root-owned; chown them on first start so
 	// the vscode user can actually write into them.

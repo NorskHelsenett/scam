@@ -12,7 +12,7 @@ ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/spam-operator .
+    go build -trimpath -ldflags="-s -w" -o /out/spam-agent .
 
 FROM scratch
 ENV GOGC=50 GOMEMLIMIT=96MiB
@@ -20,6 +20,6 @@ ENV GOGC=50 GOMEMLIMIT=96MiB
 # In-cluster auth uses the mounted serviceaccount ca.crt and doesn't need this,
 # but it keeps the image usable for local/debug runs too.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/spam-operator /spam-operator
+COPY --from=build /out/spam-agent /spam-agent
 USER 65532:65532
-ENTRYPOINT ["/spam-operator"]
+ENTRYPOINT ["/spam-agent"]

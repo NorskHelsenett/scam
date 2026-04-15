@@ -1,4 +1,4 @@
-module github.com/jonasbg/spam-operator
+module github.com/jonasbg/spam-agent
 
 go 1.26.0
 

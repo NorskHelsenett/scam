@@ -1,6 +1,6 @@
 # What spam needs to build
 
-The operator is deliberately dumb. All of the following decisions,
+The agent is deliberately dumb. All of the following decisions,
 resolutions, and joins live server-side in `spam`. This doc lists them so
 the `spam` team knows what's on their plate.
 
@@ -8,7 +8,7 @@ See [`records.md`](records.md) for the wire schema.
 
 ## 1. Ingest endpoint
 
-There isn't one yet. The operator currently only writes to stdout. The
+There isn't one yet. The agent currently only writes to stdout. The
 eventual shape needs to accept batches of records (one kind per record)
 and carry cluster identity + an idempotency signal.
 
@@ -26,12 +26,12 @@ Content-Type: application/x-ndjson
 
 Design notes:
 
-- **Newline-delimited JSON** keeps the operator side zero-cost (each
+- **Newline-delimited JSON** keeps the agent side zero-cost (each
   slog line = one payload line) and streams well through HTTP.
-- **Per-cluster bearer token** in a Secret mounted to the operator Pod.
+- **Per-cluster bearer token** in a Secret mounted to the agent Pod.
   Rotate by replacing the Secret and restarting.
 - **Idempotent ingest** — see §2.
-- **Batching** — operator buffers and flushes every N seconds or when
+- **Batching** — agent buffers and flushes every N seconds or when
   the buffer hits K KiB. Not yet implemented.
 
 ## 2. Deduplication: join by UID, not by name
@@ -47,7 +47,7 @@ Every record carries a stable Kubernetes UID. Use it.
 Why the UID is the primary key:
 
 - StatefulSet pod `vaultwarden-0` gets recreated → same name, **new UID**.
-- Operator restarts → re-emits every object as `INITIAL` with unchanged
+- Agent restarts → re-emits every object as `INITIAL` with unchanged
   UIDs. Without UID matching, `spam` would duplicate history.
 - `kubectl delete ing foo && kubectl apply -f foo.yaml` produces a new
   UID. Correctly treated as a new resource.
@@ -58,7 +58,7 @@ startup snapshot or the live stream. It does **not** tell you whether
 
 ## 3. Resolving OCI image labels
 
-The operator does **not** talk to registries. It only forwards what the
+The agent does **not** talk to registries. It only forwards what the
 Kubernetes API reported: `registry`, `image`, `tag`, `digest`,
 `image_spec`, `image_id`.
 
@@ -69,7 +69,7 @@ Kubernetes API reported: `registry`, `image`, `tag`, `digest`,
 2. Pull the image config blob from `{registry}/{image}@{digest}` using
    the OCI Distribution API, extract `config.Labels`, store them.
 3. Central registry credentials — ideally one central store, not
-   per-cluster. Operator has no creds and doesn't need any.
+   per-cluster. Agent has no creds and doesn't need any.
 4. Respect `image_spec` / `image_id` as ground truth if the parsed
    fields look wrong for some exotic reference.
 
@@ -135,9 +135,9 @@ Notes:
 
 - **Cache by digest, not tag.** Digests are content-addressed → one fetch
   per unique digest, ever. If a repo pushes a new digest with the same
-  tag, the operator emits the new digest; spam resolves the new row.
+  tag, the agent emits the new digest; spam resolves the new row.
 - **Multi-arch manifests.** A tag can point to a manifest list; the
-  operator already emits the per-platform digest the kubelet resolved, so
+  agent already emits the per-platform digest the kubelet resolved, so
   config-by-digest fetch gives you the right platform's labels directly.
 - **Missing labels are fine.** Not every image sets `image.source` — base
   images, distroless, scratch, third-party tags. Leave `repo_binding_id`
@@ -149,7 +149,7 @@ Notes:
 
 ## 4. Exposure graph computation
 
-The operator gives you the pieces. `spam` assembles them.
+The agent gives you the pieces. `spam` assembles them.
 
 ```
 Pod ──matches labels←──── Service.selector ────referenced by────→ (Ingress | *Route | IngressRoute*)
@@ -162,7 +162,7 @@ Concretely:
 1. **Pod ↔ Service:** a Pod belongs to a Service if `Pod.pod_labels ⊇
    Service.selector` and the pod's namespace matches the service's.
    Empty selector means "no pod matching" (manually-managed endpoints —
-   rare, not currently tracked by the operator).
+   rare, not currently tracked by the agent).
 2. **Service ↔ Ingress:** an Ingress exposes a Service if one of its
    `rules[].paths[]` has `backend_kind:"Service"` and
    `backend_name == Service.name` (same namespace).
@@ -187,7 +187,7 @@ Cache the graph, invalidate on each UPDATE/EXPOSURE.
 
 ## 5. Local vs public IP classification
 
-Operator ships raw IPs. `spam` decides what "local" means. Suggested
+Agent ships raw IPs. `spam` decides what "local" means. Suggested
 rules:
 
 | CIDR | Classification |
@@ -251,11 +251,11 @@ Once you have `(digest → repo, commit)`:
 ## 8. Known gotchas
 
 - **Late reference.** An Ingress created after its backend ClusterIP
-  Service may not force a fresh Service emission — the operator covers
+  Service may not force a fresh Service emission — the agent covers
   this by emitting `EXPOSURE` on Ingress/Route add/update, re-fetching
   each referenced Service from the cache. `spam` should handle
   `EXPOSURE` identically to `UPDATE`.
-- **Eventual consistency on restart.** If the operator restarts, every
+- **Eventual consistency on restart.** If the agent restarts, every
   object is re-emitted as `INITIAL`. `spam` should dedup by UID, not
   treat each `INITIAL` as a new observation.
 - **Traefik legacy group.** Clusters with both `traefik.io` and
@@ -265,7 +265,7 @@ Once you have `(digest → repo, commit)`:
 - **Empty digest on ADD.** New pods emit containers with empty
   `digest` / `image_id` until the kubelet finishes pulling. A
   follow-up `UPDATE` fills them in.
-- **No EndpointSlice.** The operator drops EndpointSlice watching —
+- **No EndpointSlice.** The agent drops EndpointSlice watching —
   compute pod↔service backing from Service.selector + Pod labels.
   Headless services with manually-populated endpoints aren't covered;
   if that matters for your use case, reopen the decision.

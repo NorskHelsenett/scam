@@ -268,7 +268,7 @@ func parseParentRefs(u *unstructured.Unstructured) []parentRef {
 	return out
 }
 
-// collectRouteBackends flattens backendRefs from every rule. The operator is
+// collectRouteBackends flattens backendRefs from every rule. The agent is
 // a dumb collector: we don't preserve per-rule grouping (that can be done
 // server-side from the raw object if needed later). We only need the
 // reference set for "which Services get traffic via this route".
