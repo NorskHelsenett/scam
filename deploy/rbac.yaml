@@ -32,6 +32,14 @@ rules:
       - tlsroutes
       - tcproutes
     verbs: ["get", "list", "watch"]
+  # Traefik's own CRDs for HTTP/TCP/UDP routing. The operator probes for the
+  # current "traefik.io" and legacy "traefik.containo.us" groups.
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

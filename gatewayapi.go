@@ -133,10 +133,10 @@ func dumpGatewayAPI(gvr schema.GroupVersionResource, inf cache.SharedIndexInform
 		}
 		return us[i].GetName() < us[j].GetName()
 	})
-	log.Info("initial snapshot", "kind", kindFromResource(gvr.Resource), "count", len(us))
 	for _, u := range us {
 		emitGatewayAPI("INITIAL", gvr, u)
 	}
+	log.Info("initial snapshot", "kind", kindFromResource(gvr.Resource), "cached", len(us), "emitted", len(us))
 }
 
 func emitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
@@ -181,6 +181,7 @@ func emitGateway(event string, gvr schema.GroupVersionResource, u *unstructured.
 		"kind", "Gateway",
 		"api_version", gvr.GroupVersion().String(),
 		"cluster", cluster,
+		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
@@ -235,6 +236,7 @@ func emitGatewayClass(event string, gvr schema.GroupVersionResource, u *unstruct
 		"kind", "GatewayClass",
 		"api_version", gvr.GroupVersion().String(),
 		"cluster", cluster,
+		"uid", string(u.GetUID()),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
 		"controller", controller,
@@ -269,6 +271,7 @@ func emitRoute(event string, gvr schema.GroupVersionResource, u *unstructured.Un
 		"kind", kind,
 		"api_version", gvr.GroupVersion().String(),
 		"cluster", cluster,
+		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),

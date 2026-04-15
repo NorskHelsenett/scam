@@ -103,12 +103,18 @@ func main() {
 	_ = icInf.Informer().SetTransform(trimMeta)
 	registerIngressClassHandler(icInf, &synced)
 
-	// ---- Gateway API via dynamic informer, only if CRDs are installed ---
-	gwGVRs := discoverGatewayAPI(discClient)
+	// ---- Gateway API + Traefik via dynamic informers, each only if CRDs are installed ---
 	var dynFactory dynamicinformer.DynamicSharedInformerFactory
-	gwInformers := map[string]cache.SharedIndexInformer{} // keyed by "group/version/resource"
-	if len(gwGVRs) > 0 {
+
+	gwGVRs := discoverGatewayAPI(discClient)
+	gwInformers := map[string]cache.SharedIndexInformer{}
+	trGVRs := discoverTraefik(discClient)
+	trInformers := map[string]cache.SharedIndexInformer{}
+
+	if len(gwGVRs) > 0 || len(trGVRs) > 0 {
 		dynFactory = dynamicinformer.NewDynamicSharedInformerFactory(dynClient, 0)
+	}
+	if len(gwGVRs) > 0 {
 		for _, gvr := range gwGVRs {
 			inf := dynFactory.ForResource(gvr).Informer()
 			_ = inf.SetTransform(trimUnstructured)
@@ -119,6 +125,18 @@ func main() {
 		log.Info("gateway API detected", "resources", gvrStrings(gwGVRs))
 	} else {
 		log.Info("gateway API CRDs not installed; skipping")
+	}
+	if len(trGVRs) > 0 {
+		for _, gvr := range trGVRs {
+			inf := dynFactory.ForResource(gvr).Informer()
+			_ = inf.SetTransform(trimUnstructured)
+			registerTraefikHandler(inf, gvr, &synced)
+			trInformers[gvr.String()] = inf
+		}
+		refs.trInformers = trInformers
+		log.Info("traefik CRDs detected", "resources", gvrStrings(trGVRs))
+	} else {
+		log.Info("traefik CRDs not installed; skipping")
 	}
 
 	// ---- start + wait for sync -----------------------------------------
@@ -142,6 +160,9 @@ func main() {
 	for _, inf := range gwInformers {
 		syncs = append(syncs, inf.HasSynced)
 	}
+	for _, inf := range trInformers {
+		syncs = append(syncs, inf.HasSynced)
+	}
 	if !cache.WaitForCacheSync(ctx.Done(), syncs...) {
 		log.Error("cache sync aborted")
 		os.Exit(1)
@@ -149,10 +170,13 @@ func main() {
 
 	// ---- initial sorted snapshot per kind ------------------------------
 	dumpPods(podInf)
-	// Gateway API before Services so exposure-reference lookups find routes
-	// in-cache when we filter ClusterIP services.
+	// Route-bearing resources before Services so exposure-reference lookups
+	// find routes in-cache when we filter ClusterIP services.
 	for _, gvr := range gwGVRs {
 		dumpGatewayAPI(gvr, gwInformers[gvr.String()])
+	}
+	for _, gvr := range trGVRs {
+		dumpTraefik(gvr, trInformers[gvr.String()])
 	}
 	dumpIngresses(ingInf)
 	dumpIngressClasses(icInf)

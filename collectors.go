@@ -23,7 +23,8 @@ import (
 var refs struct {
 	services    coreinformers.ServiceInformer
 	ingresses   netinformers.IngressInformer
-	gwInformers map[string]cache.SharedIndexInformer
+	gwInformers map[string]cache.SharedIndexInformer // Gateway API, keyed by gvr.String()
+	trInformers map[string]cache.SharedIndexInformer // Traefik, keyed by gvr.String()
 }
 
 // ---------- Pods / Containers ---------------------------------------------
@@ -59,10 +60,13 @@ func dumpPods(inf coreinformers.PodInformer) {
 		return
 	}
 	sort.Slice(pods, func(i, j int) bool { return lessPod(pods[i], pods[j]) })
-	log.Info("initial snapshot", "kind", "Pod", "count", len(pods))
+	emitted := 0
 	for _, p := range pods {
-		emitPod("INITIAL", p, nil)
+		emitted += emitPod("INITIAL", p, nil)
 	}
+	// Pods have a 1:N relationship with emitted records (one per container),
+	// so we report both cached pods and emitted container records.
+	log.Info("initial snapshot", "kind", "Pod", "cached", len(pods), "emitted_containers", emitted)
 }
 
 func lessPod(a, b *corev1.Pod) bool {
@@ -131,10 +135,10 @@ func collectContainers(p *corev1.Pod) []containerRef {
 	return out
 }
 
-// emitPod logs one line per container. On UPDATE, containers whose image+imageID
-// didn't change are suppressed so rolling digest resolution is visible without
-// spamming on every status tick.
-func emitPod(event string, p, oldP *corev1.Pod) {
+// emitPod logs one line per container and returns how many it emitted. On
+// UPDATE, containers whose image+imageID didn't change are suppressed so
+// rolling digest resolution is visible without spamming on every status tick.
+func emitPod(event string, p, oldP *corev1.Pod) int {
 	ok, on := podOwner(p)
 	cur := collectContainers(p)
 	var prev map[string]containerRef
@@ -145,29 +149,41 @@ func emitPod(event string, p, oldP *corev1.Pod) {
 			prev[c.kind+"/"+c.name] = c
 		}
 	}
+	emitted := 0
 	for _, c := range cur {
 		if prev != nil {
 			if q, ok := prev[c.kind+"/"+c.name]; ok && q.spec == c.spec && q.id == c.id {
 				continue
 			}
 		}
-		repo, tag, digest := splitImage(c.spec, c.id)
+		fullRepo, tag, digest := splitImage(c.spec, c.id)
+		image, registry := splitImageName(fullRepo)
+		// image_spec is the raw PodSpec string (e.g., "vaultwarden/server:1.35.4").
+		// image_id is the resolved reference the kubelet reports (may be empty
+		// if the image hasn't been pulled yet). Both are preserved alongside
+		// our parsed registry/image/tag/digest as ground truth — if the parse
+		// is wrong for some weird ref, consumers can fall back to these.
 		log.Info(event,
 			"kind", "Container",
 			"cluster", cluster,
 			"namespace", p.Namespace,
+			"pod_uid", string(p.UID),
 			"owner_kind", ok,
 			"owner", on,
 			"pod", p.Name,
 			"pod_labels", p.Labels,
 			"container_kind", c.kind,
 			"container", c.name,
-			"image", shortName(repo),
-			"repo", repo,
+			"registry", registry,
+			"image", image,
 			"tag", tag,
 			"digest", digest,
+			"image_spec", c.spec,
+			"image_id", c.id,
 		)
+		emitted++
 	}
+	return emitted
 }
 
 // ---------- Services ------------------------------------------------------
@@ -214,20 +230,25 @@ func dumpServices(inf coreinformers.ServiceInformer) {
 		}
 		return list[i].Name < list[j].Name
 	})
-	log.Info("initial snapshot", "kind", "Service", "count", len(list))
+	emitted := 0
 	for _, s := range list {
-		emitService("INITIAL", s)
+		if emitService("INITIAL", s) {
+			emitted++
+		}
 	}
+	log.Info("initial snapshot", "kind", "Service", "cached", len(list), "emitted", emitted)
 }
 
 // emitService applies the "drop cluster-internal ClusterIPs" filter before
-// delegating to emitServiceRaw. Callers that need to emit regardless (for
-// services referenced by Ingresses/Routes) should use emitServiceForce.
-func emitService(event string, s *corev1.Service) {
+// delegating to emitServiceRaw. Returns true if the Service was emitted.
+// Callers that need to emit regardless (for services referenced by
+// Ingresses/Routes) should use emitServiceForce.
+func emitService(event string, s *corev1.Service) bool {
 	if s.Spec.Type == corev1.ServiceTypeClusterIP && !serviceReferenced(s.Namespace, s.Name) {
-		return
+		return false
 	}
 	emitServiceRaw(event, s)
+	return true
 }
 
 func emitServiceRaw(event string, s *corev1.Service) {
@@ -246,6 +267,7 @@ func emitServiceRaw(event string, s *corev1.Service) {
 	log.Info(event,
 		"kind", "Service",
 		"cluster", cluster,
+		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,
 		"labels", s.Labels,
@@ -350,10 +372,10 @@ func dumpIngresses(inf netinformers.IngressInformer) {
 		}
 		return list[i].Name < list[j].Name
 	})
-	log.Info("initial snapshot", "kind", "Ingress", "count", len(list))
 	for _, i := range list {
 		emitIngress("INITIAL", i)
 	}
+	log.Info("initial snapshot", "kind", "Ingress", "cached", len(list), "emitted", len(list))
 }
 
 func emitIngress(event string, i *networkingv1.Ingress) {
@@ -395,6 +417,7 @@ func emitIngress(event string, i *networkingv1.Ingress) {
 	log.Info(event,
 		"kind", "Ingress",
 		"cluster", cluster,
+		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
 		"labels", i.Labels,
@@ -436,16 +459,17 @@ func dumpIngressClasses(inf netinformers.IngressClassInformer) {
 		return
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	log.Info("initial snapshot", "kind", "IngressClass", "count", len(list))
 	for _, ic := range list {
 		emitIngressClass("INITIAL", ic)
 	}
+	log.Info("initial snapshot", "kind", "IngressClass", "cached", len(list), "emitted", len(list))
 }
 
 func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 	log.Info(event,
 		"kind", "IngressClass",
 		"cluster", cluster,
+		"uid", string(ic.UID),
 		"name", ic.Name,
 		"labels", ic.Labels,
 		"controller", ic.Spec.Controller,
@@ -468,17 +492,32 @@ func serviceReferenced(ns, name string) bool {
 			}
 		}
 	}
-	// Gateway API routes (httproutes, grpcroutes, tlsroutes, tcproutes).
+	// Gateway API routes. Skip the non-route kinds (Gateway, GatewayClass).
 	for gvrStr, inf := range refs.gwInformers {
-		if !isRouteResource(gvrStr) {
+		if !isGatewayRouteGVRString(gvrStr) {
 			continue
 		}
-		for _, obj := range inf.GetIndexer().List() {
-			u, ok := obj.(*unstructured.Unstructured)
-			if !ok {
-				continue
-			}
-			if routeReferencesService(u, ns, name) {
+		if anyBackendMatches(inf, routeBackends, ns, name) {
+			return true
+		}
+	}
+	// Traefik IngressRoutes — all three kinds are routes.
+	for _, inf := range refs.trInformers {
+		if anyBackendMatches(inf, traefikBackends, ns, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyBackendMatches(inf cache.SharedIndexInformer, extract func(*unstructured.Unstructured) []backendTarget, ns, name string) bool {
+	for _, obj := range inf.GetIndexer().List() {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+		for _, b := range extract(u) {
+			if b.namespace == ns && b.name == name {
 				return true
 			}
 		}
@@ -486,7 +525,7 @@ func serviceReferenced(ns, name string) bool {
 	return false
 }
 
-func isRouteResource(gvrStr string) bool {
+func isGatewayRouteGVRString(gvrStr string) bool {
 	return strings.HasSuffix(gvrStr, "httproutes") ||
 		strings.HasSuffix(gvrStr, "grpcroutes") ||
 		strings.HasSuffix(gvrStr, "tlsroutes") ||
@@ -507,39 +546,6 @@ func ingressReferencesService(ing *networkingv1.Ingress, ns, name string) bool {
 		}
 		for _, p := range r.HTTP.Paths {
 			if p.Backend.Service != nil && p.Backend.Service.Name == name {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func routeReferencesService(u *unstructured.Unstructured, ns, name string) bool {
-	rules, _, _ := unstructured.NestedSlice(u.Object, "spec", "rules")
-	for _, r := range rules {
-		rm, ok := r.(map[string]any)
-		if !ok {
-			continue
-		}
-		brefs, _, _ := unstructured.NestedSlice(rm, "backendRefs")
-		for _, x := range brefs {
-			m, ok := x.(map[string]any)
-			if !ok {
-				continue
-			}
-			kind, _, _ := unstructured.NestedString(m, "kind")
-			if kind != "" && kind != "Service" {
-				continue
-			}
-			rn, _, _ := unstructured.NestedString(m, "name")
-			if rn != name {
-				continue
-			}
-			rns, _, _ := unstructured.NestedString(m, "namespace")
-			if rns == "" {
-				rns = u.GetNamespace() // defaults to the route's namespace
-			}
-			if rns == ns {
 				return true
 			}
 		}
@@ -663,17 +669,30 @@ func colonAfter(s string, from int) int {
 	return -1
 }
 
-// shortName strips the registry host from a repo and drops Docker Hub's
-// synthetic "library/" namespace.
-func shortName(repo string) string {
-	s := repo
-	if i := strings.IndexByte(s, '/'); i > 0 {
-		first := s[:i]
+// splitImageName separates the registry host from the image path on that
+// registry. The first '/'-separated segment counts as a registry only if it
+// contains '.' or ':' or equals "localhost". Docker Hub's synthetic
+// "library/" namespace is dropped from the image path.
+//
+//	docker.io/library/postgres             -> registry=docker.io,        image=postgres
+//	docker.io/vaultwarden/server           -> registry=docker.io,        image=vaultwarden/server
+//	git.torden.tech/jonasbg/spam-operator  -> registry=git.torden.tech,  image=jonasbg/spam-operator
+//	git.torden.tech/jonasbg/spam/trivy-... -> registry=git.torden.tech,  image=jonasbg/spam/trivy-scanner
+//	quay.io/argoproj/argocd                -> registry=quay.io,          image=argoproj/argocd
+//	docker.io/traefik                      -> registry=docker.io,        image=traefik
+//	myimage                                -> registry="",               image=myimage
+func splitImageName(full string) (image, registry string) {
+	if i := strings.IndexByte(full, '/'); i > 0 {
+		first := full[:i]
 		if strings.ContainsAny(first, ".:") || first == "localhost" {
-			s = s[i+1:]
+			registry = first
+			full = full[i+1:]
 		}
 	}
-	return strings.TrimPrefix(s, "library/")
+	if registry == "docker.io" {
+		full = strings.TrimPrefix(full, "library/")
+	}
+	return full, registry
 }
 
 // ---------- misc ----------------------------------------------------------
