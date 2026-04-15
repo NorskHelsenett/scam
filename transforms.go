@@ -99,10 +99,12 @@ func trimUnstructured(obj any) (any, error) {
 	u.SetAnnotations(nil)
 	u.SetManagedFields(nil)
 	u.SetFinalizers(nil)
-	// Also strip conditions arrays in status — status churns, we only want
-	// addresses/listeners/parentRefs from status.
+	// status on routes/gateways churns hard (per-parent conditions, listener
+	// attach state). We never emit any of it, so drop it wholesale. Gateway
+	// status.addresses is what we read; keep only that.
 	unstructured.RemoveNestedField(u.Object, "status", "conditions")
 	unstructured.RemoveNestedField(u.Object, "status", "listeners")
+	unstructured.RemoveNestedField(u.Object, "status", "parents")
 	return u, nil
 }
 

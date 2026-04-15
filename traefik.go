@@ -80,6 +80,17 @@ func wantTraefikResource(name string) bool {
 	return false
 }
 
+// traefikBackendKeys is a cache.IndexFunc: maps a Traefik route to its
+// referenced Service keys ("ns/name"). Used by serviceReferenced to do an
+// O(1) "is this Service exposed via Traefik?" lookup.
+func traefikBackendKeys(obj any) ([]string, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, nil
+	}
+	return backendTargetsToKeys(traefikBackends(u)), nil
+}
+
 func registerTraefikHandler(inf cache.SharedIndexInformer, gvr schema.GroupVersionResource, synced *atomic.Bool) {
 	_, _ = inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {

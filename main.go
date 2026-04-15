@@ -97,6 +97,7 @@ func main() {
 
 	ingInf := factory.Networking().V1().Ingresses()
 	_ = ingInf.Informer().SetTransform(trimIngress)
+	_ = ingInf.Informer().AddIndexers(cache.Indexers{backendIndexName: ingressBackendKeys})
 	registerIngressHandler(ingInf, &synced)
 
 	icInf := factory.Networking().V1().IngressClasses()
@@ -118,6 +119,9 @@ func main() {
 		for _, gvr := range gwGVRs {
 			inf := dynFactory.ForResource(gvr).Informer()
 			_ = inf.SetTransform(trimUnstructured)
+			if isRouteGVR(gvr) {
+				_ = inf.AddIndexers(cache.Indexers{backendIndexName: routeBackendKeys})
+			}
 			registerGatewayAPIHandler(inf, gvr, &synced)
 			gwInformers[gvr.String()] = inf
 		}
@@ -130,6 +134,7 @@ func main() {
 		for _, gvr := range trGVRs {
 			inf := dynFactory.ForResource(gvr).Informer()
 			_ = inf.SetTransform(trimUnstructured)
+			_ = inf.AddIndexers(cache.Indexers{backendIndexName: traefikBackendKeys})
 			registerTraefikHandler(inf, gvr, &synced)
 			trInformers[gvr.String()] = inf
 		}

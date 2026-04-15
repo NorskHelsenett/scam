@@ -106,39 +106,91 @@ type containerRef struct {
 func collectContainers(p *corev1.Pod) []containerRef {
 	n := len(p.Spec.InitContainers) + len(p.Spec.Containers) + len(p.Spec.EphemeralContainers)
 	out := make([]containerRef, 0, n)
-	status := func(kind, name string) string {
-		var list []corev1.ContainerStatus
-		switch kind {
-		case "init":
-			list = p.Status.InitContainerStatuses
-		case "main":
-			list = p.Status.ContainerStatuses
-		case "ephemeral":
-			list = p.Status.EphemeralContainerStatuses
-		}
-		for i := range list {
-			if list[i].Name == name {
-				return list[i].ImageID
-			}
-		}
-		return ""
-	}
 	for _, c := range p.Spec.InitContainers {
-		out = append(out, containerRef{"init", c.Name, c.Image, status("init", c.Name)})
+		out = append(out, containerRef{"init", c.Name, c.Image, statusImageID(p.Status.InitContainerStatuses, c.Name)})
 	}
 	for _, c := range p.Spec.Containers {
-		out = append(out, containerRef{"main", c.Name, c.Image, status("main", c.Name)})
+		out = append(out, containerRef{"main", c.Name, c.Image, statusImageID(p.Status.ContainerStatuses, c.Name)})
 	}
 	for _, c := range p.Spec.EphemeralContainers {
-		out = append(out, containerRef{"ephemeral", c.Name, c.Image, status("ephemeral", c.Name)})
+		out = append(out, containerRef{"ephemeral", c.Name, c.Image, statusImageID(p.Status.EphemeralContainerStatuses, c.Name)})
 	}
 	return out
+}
+
+func statusImageID(list []corev1.ContainerStatus, name string) string {
+	for i := range list {
+		if list[i].Name == name {
+			return list[i].ImageID
+		}
+	}
+	return ""
+}
+
+// samePodImages reports whether two Pods' container specs and resolved
+// imageIDs are identical — the only facts emitPod actually emits. Lets us
+// short-circuit pod status churn (IP flips, condition ticks, etc.) without
+// allocating collectContainers + its prev map.
+func samePodImages(a, b *corev1.Pod) bool {
+	if len(a.Spec.InitContainers) != len(b.Spec.InitContainers) ||
+		len(a.Spec.Containers) != len(b.Spec.Containers) ||
+		len(a.Spec.EphemeralContainers) != len(b.Spec.EphemeralContainers) {
+		return false
+	}
+	for i := range a.Spec.InitContainers {
+		if a.Spec.InitContainers[i].Name != b.Spec.InitContainers[i].Name ||
+			a.Spec.InitContainers[i].Image != b.Spec.InitContainers[i].Image {
+			return false
+		}
+	}
+	for i := range a.Spec.Containers {
+		if a.Spec.Containers[i].Name != b.Spec.Containers[i].Name ||
+			a.Spec.Containers[i].Image != b.Spec.Containers[i].Image {
+			return false
+		}
+	}
+	for i := range a.Spec.EphemeralContainers {
+		if a.Spec.EphemeralContainers[i].Name != b.Spec.EphemeralContainers[i].Name ||
+			a.Spec.EphemeralContainers[i].Image != b.Spec.EphemeralContainers[i].Image {
+			return false
+		}
+	}
+	return sameImageIDs(a.Status.InitContainerStatuses, b.Status.InitContainerStatuses) &&
+		sameImageIDs(a.Status.ContainerStatuses, b.Status.ContainerStatuses) &&
+		sameImageIDs(a.Status.EphemeralContainerStatuses, b.Status.EphemeralContainerStatuses)
+}
+
+func sameImageIDs(a, b []corev1.ContainerStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Status entries aren't guaranteed to be in the same order as spec, so
+	// match by name via a linear scan. Container counts per pod are tiny.
+	for i := range a {
+		id := ""
+		for j := range b {
+			if a[i].Name == b[j].Name {
+				id = b[j].ImageID
+				break
+			}
+		}
+		if a[i].ImageID != id {
+			return false
+		}
+	}
+	return true
 }
 
 // emitPod logs one line per container and returns how many it emitted. On
 // UPDATE, containers whose image+imageID didn't change are suppressed so
 // rolling digest resolution is visible without spamming on every status tick.
 func emitPod(event string, p, oldP *corev1.Pod) int {
+	// Fast path: most pod UPDATEs are status churn (IP flips, condition
+	// ticks). If the image set and resolved imageIDs haven't moved, we have
+	// nothing to emit — bail before allocating anything.
+	if oldP != nil && samePodImages(oldP, p) {
+		return 0
+	}
 	ok, on := podOwner(p)
 	cur := collectContainers(p)
 	var prev map[string]containerRef
@@ -482,75 +534,84 @@ func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 // from outside the cluster) OR if any Ingress / Gateway API route points to it.
 // ClusterIP services that nobody exposes are cluster-internal noise we drop.
 
+// backendIndexName is the name of the cache.Indexer attached to each
+// Ingress/route informer that maps "ns/svcName" keys → referring objects.
+// serviceReferenced is then an O(1) lookup.
+const backendIndexName = "byBackend"
+
 func serviceReferenced(ns, name string) bool {
-	// Ingresses (same-namespace backends by spec).
+	key := ns + "/" + name
 	if refs.ingresses != nil {
-		ings, _ := refs.ingresses.Lister().List(labels.Everything())
-		for _, ing := range ings {
-			if ingressReferencesService(ing, ns, name) {
-				return true
-			}
-		}
-	}
-	// Gateway API routes. Skip the non-route kinds (Gateway, GatewayClass).
-	for gvrStr, inf := range refs.gwInformers {
-		if !isGatewayRouteGVRString(gvrStr) {
-			continue
-		}
-		if anyBackendMatches(inf, routeBackends, ns, name) {
+		if objs, _ := refs.ingresses.Informer().GetIndexer().ByIndex(backendIndexName, key); len(objs) > 0 {
 			return true
 		}
 	}
-	// Traefik IngressRoutes — all three kinds are routes.
+	// Gateway API routes. Non-route kinds (Gateway, GatewayClass) simply have
+	// no entries under this index, so the lookup is cheap regardless.
+	for _, inf := range refs.gwInformers {
+		if objs, _ := inf.GetIndexer().ByIndex(backendIndexName, key); len(objs) > 0 {
+			return true
+		}
+	}
 	for _, inf := range refs.trInformers {
-		if anyBackendMatches(inf, traefikBackends, ns, name) {
+		if objs, _ := inf.GetIndexer().ByIndex(backendIndexName, key); len(objs) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func anyBackendMatches(inf cache.SharedIndexInformer, extract func(*unstructured.Unstructured) []backendTarget, ns, name string) bool {
-	for _, obj := range inf.GetIndexer().List() {
-		u, ok := obj.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		for _, b := range extract(u) {
-			if b.namespace == ns && b.name == name {
-				return true
-			}
-		}
-	}
-	return false
-}
+// ---------- indexer key extractors (one per informer) ---------------------
 
-func isGatewayRouteGVRString(gvrStr string) bool {
-	return strings.HasSuffix(gvrStr, "httproutes") ||
-		strings.HasSuffix(gvrStr, "grpcroutes") ||
-		strings.HasSuffix(gvrStr, "tlsroutes") ||
-		strings.HasSuffix(gvrStr, "tcproutes")
-}
-
-func ingressReferencesService(ing *networkingv1.Ingress, ns, name string) bool {
-	if ing.Namespace != ns {
-		return false // Ingress backends live in the same namespace.
+func ingressBackendKeys(obj any) ([]string, error) {
+	ing, ok := obj.(*networkingv1.Ingress)
+	if !ok {
+		return nil, nil
 	}
-	if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil &&
-		ing.Spec.DefaultBackend.Service.Name == name {
-		return true
+	var keys []string
+	seen := make(map[string]struct{})
+	add := func(svcName string) {
+		if svcName == "" {
+			return
+		}
+		k := ing.Namespace + "/" + svcName
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
+		add(ing.Spec.DefaultBackend.Service.Name)
 	}
 	for _, r := range ing.Spec.Rules {
 		if r.HTTP == nil {
 			continue
 		}
 		for _, p := range r.HTTP.Paths {
-			if p.Backend.Service != nil && p.Backend.Service.Name == name {
-				return true
+			if p.Backend.Service != nil {
+				add(p.Backend.Service.Name)
 			}
 		}
 	}
-	return false
+	return keys, nil
+}
+
+func backendTargetsToKeys(targets []backendTarget) []string {
+	if len(targets) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(targets))
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		k := t.namespace + "/" + t.name
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
 }
 
 // backendTarget identifies a Service a given Ingress/Route points at.
@@ -611,10 +672,22 @@ func routeBackends(u *unstructured.Unstructured) []backendTarget {
 // chain — which emitService would otherwise filter out — still make it into
 // the record stream.
 func refreshBackendServices(targets []backendTarget) {
-	if refs.services == nil {
+	if refs.services == nil || len(targets) == 0 {
 		return
 	}
+	// A single Ingress/Route routinely points at the same Service from
+	// multiple rules/paths. Dedup before lister lookups + emits.
+	var seen map[backendTarget]struct{}
+	if len(targets) > 1 {
+		seen = make(map[backendTarget]struct{}, len(targets))
+	}
 	for _, t := range targets {
+		if seen != nil {
+			if _, dup := seen[t]; dup {
+				continue
+			}
+			seen[t] = struct{}{}
+		}
 		svc, err := refs.services.Lister().Services(t.namespace).Get(t.name)
 		if err != nil || svc == nil {
 			continue

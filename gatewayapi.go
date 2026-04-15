@@ -111,6 +111,17 @@ func registerGatewayAPIHandler(inf cache.SharedIndexInformer, gvr schema.GroupVe
 	})
 }
 
+// routeBackendKeys is a cache.IndexFunc: maps a route Unstructured to its
+// referenced Service keys ("ns/name"). Non-route objects (Gateway,
+// GatewayClass) contribute no keys, so the indexer is still safe to attach.
+func routeBackendKeys(obj any) ([]string, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, nil
+	}
+	return backendTargetsToKeys(routeBackends(u)), nil
+}
+
 func isRouteGVR(gvr schema.GroupVersionResource) bool {
 	switch gvr.Resource {
 	case "httproutes", "grpcroutes", "tlsroutes", "tcproutes":
