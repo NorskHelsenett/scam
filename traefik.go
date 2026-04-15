@@ -3,7 +3,6 @@ package main
 import (
 	"regexp"
 	"sort"
-	"sync/atomic"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -91,54 +90,12 @@ func traefikBackendKeys(obj any) ([]string, error) {
 	return backendTargetsToKeys(traefikBackends(u)), nil
 }
 
-func registerTraefikHandler(inf cache.SharedIndexInformer, gvr schema.GroupVersionResource, synced *atomic.Bool) {
-	_, _ = inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if u, ok := obj.(*unstructured.Unstructured); ok {
-				emitTraefik("ADD", gvr, u)
-				refreshBackendServices(traefikBackends(u))
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			if u, ok := newObj.(*unstructured.Unstructured); ok {
-				emitTraefik("UPDATE", gvr, u)
-				refreshBackendServices(traefikBackends(u))
-			}
-		},
-	})
-}
-
 func dumpTraefik(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer) {
-	objs := inf.GetIndexer().List()
-	us := make([]*unstructured.Unstructured, 0, len(objs))
-	for _, o := range objs {
-		if u, ok := o.(*unstructured.Unstructured); ok {
-			us = append(us, u)
-		}
-	}
-	sort.Slice(us, func(i, j int) bool {
-		if us[i].GetNamespace() != us[j].GetNamespace() {
-			return us[i].GetNamespace() < us[j].GetNamespace()
-		}
-		return us[i].GetName() < us[j].GetName()
-	})
-	for _, u := range us {
-		emitTraefik("INITIAL", gvr, u)
-	}
-	log.Info("initial snapshot", "kind", traefikKindFromResource(gvr.Resource), "cached", len(us), "emitted", len(us))
+	dumpSorted(traefikKindFromResource(gvr.Resource), unstructuredList(inf), lessUnstructured,
+		func(u *unstructured.Unstructured) int { emitTraefik("INITIAL", gvr, u); return 1 })
 }
 
 func emitTraefik(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
-	entryPoints, _, _ := unstructured.NestedStringSlice(u.Object, "spec", "entryPoints")
-	hosts := extractTraefikHosts(u)
-	backends := traefikBackends(u)
-	tlsSecret, _, _ := unstructured.NestedString(u.Object, "spec", "tls", "secretName")
 	log.Info(event,
 		"kind", traefikKindFromResource(gvr.Resource),
 		"api_version", gvr.GroupVersion().String(),
@@ -147,31 +104,29 @@ func emitTraefik(event string, gvr schema.GroupVersionResource, u *unstructured.
 		"namespace", u.GetNamespace(),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
-		"entry_points", entryPoints,
-		"hosts", hosts,
-		"tls_secret", tlsSecret,
-		"backends", backends,
+		"entry_points", uStringSlice(u.Object, "spec", "entryPoints"),
+		"hosts", extractTraefikHosts(u),
+		"tls_secret", uStr(u.Object, "spec", "tls", "secretName"),
+		"backends", traefikBackends(u),
 	)
 }
 
 // extractTraefikHosts pulls literal hosts out of every route's match string.
 // UDP routes have no match string, so hosts is empty for those.
 func extractTraefikHosts(u *unstructured.Unstructured) []string {
-	routes, _, _ := unstructured.NestedSlice(u.Object, "spec", "routes")
 	seen := map[string]struct{}{}
 	var out []string
-	for _, r := range routes {
+	for _, r := range uSlice(u.Object, "spec", "routes") {
 		rm, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		match, _, _ := unstructured.NestedString(rm, "match")
+		match := uStr(rm, "match")
 		if match == "" {
 			continue
 		}
 		for _, call := range hostMatcherRe.FindAllStringSubmatch(match, -1) {
-			args := call[1]
-			for _, m := range backtickedRe.FindAllStringSubmatch(args, -1) {
+			for _, m := range backtickedRe.FindAllStringSubmatch(call[1], -1) {
 				h := m[1]
 				if _, dup := seen[h]; dup {
 					continue
@@ -188,30 +143,27 @@ func extractTraefikHosts(u *unstructured.Unstructured) []string {
 // routes put backends under `services`, unlike Gateway API which uses
 // `backendRefs`.
 func traefikBackends(u *unstructured.Unstructured) []backendTarget {
-	routes, _, _ := unstructured.NestedSlice(u.Object, "spec", "routes")
 	var out []backendTarget
-	for _, r := range routes {
+	for _, r := range uSlice(u.Object, "spec", "routes") {
 		rm, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		svcs, _, _ := unstructured.NestedSlice(rm, "services")
-		for _, x := range svcs {
+		for _, x := range uSlice(rm, "services") {
 			m, ok := x.(map[string]any)
 			if !ok {
 				continue
 			}
 			// Skip Traefik-native references (TraefikService, etc.) — we only
 			// care about regular Kubernetes Services here.
-			kind, _, _ := unstructured.NestedString(m, "kind")
-			if kind != "" && kind != "Service" {
+			if kind := uStr(m, "kind"); kind != "" && kind != "Service" {
 				continue
 			}
-			name, _, _ := unstructured.NestedString(m, "name")
+			name := uStr(m, "name")
 			if name == "" {
 				continue
 			}
-			ns, _, _ := unstructured.NestedString(m, "namespace")
+			ns := uStr(m, "namespace")
 			if ns == "" {
 				ns = u.GetNamespace()
 			}
@@ -232,4 +184,3 @@ func traefikKindFromResource(r string) string {
 	}
 	return r
 }
-

@@ -25,6 +25,9 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -89,20 +92,29 @@ func main() {
 
 	podInf := factory.Core().V1().Pods()
 	_ = podInf.Informer().SetTransform(trimPod)
-	registerPodHandler(podInf, &synced)
+	onAddUpdate(podInf.Informer(), &synced, func(event string, newP, oldP *corev1.Pod) {
+		emitPod(event, newP, oldP)
+	})
 
 	svcInf := factory.Core().V1().Services()
 	_ = svcInf.Informer().SetTransform(trimService)
-	registerServiceHandler(svcInf, &synced)
+	onAddUpdate(svcInf.Informer(), &synced, func(event string, s, _ *corev1.Service) {
+		emitService(event, s)
+	})
 
 	ingInf := factory.Networking().V1().Ingresses()
 	_ = ingInf.Informer().SetTransform(trimIngress)
 	_ = ingInf.Informer().AddIndexers(cache.Indexers{backendIndexName: ingressBackendKeys})
-	registerIngressHandler(ingInf, &synced)
+	onAddUpdate(ingInf.Informer(), &synced, func(event string, i, _ *networkingv1.Ingress) {
+		emitIngress(event, i)
+		refreshBackendServices(ingressBackends(i))
+	})
 
 	icInf := factory.Networking().V1().IngressClasses()
 	_ = icInf.Informer().SetTransform(trimMeta)
-	registerIngressClassHandler(icInf, &synced)
+	onAddUpdate(icInf.Informer(), &synced, func(event string, ic, _ *networkingv1.IngressClass) {
+		emitIngressClass(event, ic)
+	})
 
 	// ---- Gateway API + Traefik via dynamic informers, each only if CRDs are installed ---
 	var dynFactory dynamicinformer.DynamicSharedInformerFactory
@@ -122,7 +134,12 @@ func main() {
 			if isRouteGVR(gvr) {
 				_ = inf.AddIndexers(cache.Indexers{backendIndexName: routeBackendKeys})
 			}
-			registerGatewayAPIHandler(inf, gvr, &synced)
+			onAddUpdate(inf, &synced, func(event string, u, _ *unstructured.Unstructured) {
+				emitGatewayAPI(event, gvr, u)
+				if isRouteGVR(gvr) {
+					refreshBackendServices(routeBackends(u))
+				}
+			})
 			gwInformers[gvr.String()] = inf
 		}
 		refs.gwInformers = gwInformers
@@ -135,7 +152,10 @@ func main() {
 			inf := dynFactory.ForResource(gvr).Informer()
 			_ = inf.SetTransform(trimUnstructured)
 			_ = inf.AddIndexers(cache.Indexers{backendIndexName: traefikBackendKeys})
-			registerTraefikHandler(inf, gvr, &synced)
+			onAddUpdate(inf, &synced, func(event string, u, _ *unstructured.Unstructured) {
+				emitTraefik(event, gvr, u)
+				refreshBackendServices(traefikBackends(u))
+			})
 			trInformers[gvr.String()] = inf
 		}
 		refs.trInformers = trInformers

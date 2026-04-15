@@ -1,9 +1,7 @@
 package main
 
 import (
-	"sort"
 	"strings"
-	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -29,44 +27,14 @@ var refs struct {
 
 // ---------- Pods / Containers ---------------------------------------------
 
-func registerPodHandler(inf coreinformers.PodInformer, synced *atomic.Bool) {
-	_, _ = inf.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if p, ok := obj.(*corev1.Pod); ok {
-				emitPod("ADD", p, nil)
-			}
-		},
-		UpdateFunc: func(oldObj, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			oldP, _ := oldObj.(*corev1.Pod)
-			newP, _ := newObj.(*corev1.Pod)
-			if newP == nil {
-				return
-			}
-			emitPod("UPDATE", newP, oldP)
-		},
-	})
-}
-
 func dumpPods(inf coreinformers.PodInformer) {
 	pods, err := inf.Lister().List(labels.Everything())
 	if err != nil {
 		log.Error("list pods", "err", err)
 		return
 	}
-	sort.Slice(pods, func(i, j int) bool { return lessPod(pods[i], pods[j]) })
-	emitted := 0
-	for _, p := range pods {
-		emitted += emitPod("INITIAL", p, nil)
-	}
-	// Pods have a 1:N relationship with emitted records (one per container),
-	// so we report both cached pods and emitted container records.
-	log.Info("initial snapshot", "kind", "Pod", "cached", len(pods), "emitted_containers", emitted)
+	// "emitted" for Pods counts container records (one Pod → N Containers).
+	dumpSorted("Pod", pods, lessPod, func(p *corev1.Pod) int { return emitPod("INITIAL", p, nil) })
 }
 
 func lessPod(a, b *corev1.Pod) bool {
@@ -249,46 +217,20 @@ type svcPort struct {
 	AppProto   string `json:"app_protocol,omitempty"`
 }
 
-func registerServiceHandler(inf coreinformers.ServiceInformer, synced *atomic.Bool) {
-	_, _ = inf.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if s, ok := obj.(*corev1.Service); ok {
-				emitService("ADD", s)
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			if s, ok := newObj.(*corev1.Service); ok {
-				emitService("UPDATE", s)
-			}
-		},
-	})
-}
-
 func dumpServices(inf coreinformers.ServiceInformer) {
 	list, err := inf.Lister().List(labels.Everything())
 	if err != nil {
 		log.Error("list services", "err", err)
 		return
 	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Namespace != list[j].Namespace {
-			return list[i].Namespace < list[j].Namespace
-		}
-		return list[i].Name < list[j].Name
-	})
-	emitted := 0
-	for _, s := range list {
-		if emitService("INITIAL", s) {
-			emitted++
-		}
-	}
-	log.Info("initial snapshot", "kind", "Service", "cached", len(list), "emitted", emitted)
+	dumpSorted("Service", list,
+		func(a, b *corev1.Service) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
+		func(s *corev1.Service) int {
+			if emitService("INITIAL", s) {
+				return 1
+			}
+			return 0
+		})
 }
 
 // emitService applies the "drop cluster-internal ClusterIPs" filter before
@@ -389,45 +331,15 @@ type ingTLS struct {
 	Secret string   `json:"secret,omitempty"`
 }
 
-func registerIngressHandler(inf netinformers.IngressInformer, synced *atomic.Bool) {
-	_, _ = inf.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if i, ok := obj.(*networkingv1.Ingress); ok {
-				emitIngress("ADD", i)
-				refreshBackendServices(ingressBackends(i))
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			if i, ok := newObj.(*networkingv1.Ingress); ok {
-				emitIngress("UPDATE", i)
-				refreshBackendServices(ingressBackends(i))
-			}
-		},
-	})
-}
-
 func dumpIngresses(inf netinformers.IngressInformer) {
 	list, err := inf.Lister().List(labels.Everything())
 	if err != nil {
 		log.Error("list ingresses", "err", err)
 		return
 	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Namespace != list[j].Namespace {
-			return list[i].Namespace < list[j].Namespace
-		}
-		return list[i].Name < list[j].Name
-	})
-	for _, i := range list {
-		emitIngress("INITIAL", i)
-	}
-	log.Info("initial snapshot", "kind", "Ingress", "cached", len(list), "emitted", len(list))
+	dumpSorted("Ingress", list,
+		func(a, b *networkingv1.Ingress) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
+		func(i *networkingv1.Ingress) int { emitIngress("INITIAL", i); return 1 })
 }
 
 func emitIngress(event string, i *networkingv1.Ingress) {
@@ -483,38 +395,15 @@ func emitIngress(event string, i *networkingv1.Ingress) {
 
 // ---------- IngressClass --------------------------------------------------
 
-func registerIngressClassHandler(inf netinformers.IngressClassInformer, synced *atomic.Bool) {
-	_, _ = inf.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if ic, ok := obj.(*networkingv1.IngressClass); ok {
-				emitIngressClass("ADD", ic)
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			if ic, ok := newObj.(*networkingv1.IngressClass); ok {
-				emitIngressClass("UPDATE", ic)
-			}
-		},
-	})
-}
-
 func dumpIngressClasses(inf netinformers.IngressClassInformer) {
 	list, err := inf.Lister().List(labels.Everything())
 	if err != nil {
 		log.Error("list ingressclasses", "err", err)
 		return
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	for _, ic := range list {
-		emitIngressClass("INITIAL", ic)
-	}
-	log.Info("initial snapshot", "kind", "IngressClass", "cached", len(list), "emitted", len(list))
+	dumpSorted("IngressClass", list,
+		func(a, b *networkingv1.IngressClass) bool { return a.Name < b.Name },
+		func(ic *networkingv1.IngressClass) int { emitIngressClass("INITIAL", ic); return 1 })
 }
 
 func emitIngressClass(event string, ic *networkingv1.IngressClass) {
@@ -637,31 +526,28 @@ func ingressBackends(ing *networkingv1.Ingress) []backendTarget {
 
 func routeBackends(u *unstructured.Unstructured) []backendTarget {
 	var out []backendTarget
-	rules, _, _ := unstructured.NestedSlice(u.Object, "spec", "rules")
-	for _, r := range rules {
+	for _, r := range uSlice(u.Object, "spec", "rules") {
 		rm, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		brefs, _, _ := unstructured.NestedSlice(rm, "backendRefs")
-		for _, x := range brefs {
+		for _, x := range uSlice(rm, "backendRefs") {
 			m, ok := x.(map[string]any)
 			if !ok {
 				continue
 			}
-			kind, _, _ := unstructured.NestedString(m, "kind")
-			if kind != "" && kind != "Service" {
+			if kind := uStr(m, "kind"); kind != "" && kind != "Service" {
 				continue
 			}
-			rn, _, _ := unstructured.NestedString(m, "name")
-			if rn == "" {
+			name := uStr(m, "name")
+			if name == "" {
 				continue
 			}
-			rns, _, _ := unstructured.NestedString(m, "namespace")
-			if rns == "" {
-				rns = u.GetNamespace()
+			ns := uStr(m, "namespace")
+			if ns == "" {
+				ns = u.GetNamespace()
 			}
-			out = append(out, backendTarget{rns, rn})
+			out = append(out, backendTarget{ns, name})
 		}
 	}
 	return out

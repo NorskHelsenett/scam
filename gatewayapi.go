@@ -3,7 +3,6 @@ package main
 import (
 	"sort"
 	"strings"
-	"sync/atomic"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -84,33 +83,6 @@ func gvrStrings(gvrs []schema.GroupVersionResource) []string {
 	return out
 }
 
-func registerGatewayAPIHandler(inf cache.SharedIndexInformer, gvr schema.GroupVersionResource, synced *atomic.Bool) {
-	_, _ = inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if !synced.Load() {
-				return
-			}
-			if u, ok := obj.(*unstructured.Unstructured); ok {
-				emitGatewayAPI("ADD", gvr, u)
-				if isRouteGVR(gvr) {
-					refreshBackendServices(routeBackends(u))
-				}
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if !synced.Load() {
-				return
-			}
-			if u, ok := newObj.(*unstructured.Unstructured); ok {
-				emitGatewayAPI("UPDATE", gvr, u)
-				if isRouteGVR(gvr) {
-					refreshBackendServices(routeBackends(u))
-				}
-			}
-		},
-	})
-}
-
 // routeBackendKeys is a cache.IndexFunc: maps a route Unstructured to its
 // referenced Service keys ("ns/name"). Non-route objects (Gateway,
 // GatewayClass) contribute no keys, so the indexer is still safe to attach.
@@ -131,23 +103,8 @@ func isRouteGVR(gvr schema.GroupVersionResource) bool {
 }
 
 func dumpGatewayAPI(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer) {
-	objs := inf.GetIndexer().List()
-	us := make([]*unstructured.Unstructured, 0, len(objs))
-	for _, o := range objs {
-		if u, ok := o.(*unstructured.Unstructured); ok {
-			us = append(us, u)
-		}
-	}
-	sort.Slice(us, func(i, j int) bool {
-		if us[i].GetNamespace() != us[j].GetNamespace() {
-			return us[i].GetNamespace() < us[j].GetNamespace()
-		}
-		return us[i].GetName() < us[j].GetName()
-	})
-	for _, u := range us {
-		emitGatewayAPI("INITIAL", gvr, u)
-	}
-	log.Info("initial snapshot", "kind", kindFromResource(gvr.Resource), "cached", len(us), "emitted", len(us))
+	dumpSorted(kindFromResource(gvr.Resource), unstructuredList(inf), lessUnstructured,
+		func(u *unstructured.Unstructured) int { emitGatewayAPI("INITIAL", gvr, u); return 1 })
 }
 
 func emitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
@@ -182,12 +139,6 @@ type gwAddress struct {
 }
 
 func emitGateway(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
-	class, _, _ := unstructured.NestedString(u.Object, "spec", "gatewayClassName")
-	listeners := parseListeners(u)
-	// Gateway status.addresses holds the actual assigned IPs/hostnames.
-	addrs := parseAddresses(u.Object, "status", "addresses")
-	// Also read spec.addresses for static assignments.
-	specAddrs := parseAddresses(u.Object, "spec", "addresses")
 	log.Info(event,
 		"kind", "Gateway",
 		"api_version", gvr.GroupVersion().String(),
@@ -196,45 +147,40 @@ func emitGateway(event string, gvr schema.GroupVersionResource, u *unstructured.
 		"namespace", u.GetNamespace(),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
-		"gateway_class", class,
-		"listeners", listeners,
-		"spec_addresses", specAddrs,
-		"addresses", addrs,
+		"gateway_class", uStr(u.Object, "spec", "gatewayClassName"),
+		"listeners", parseListeners(u),
+		"spec_addresses", parseAddresses(u.Object, "spec", "addresses"),
+		"addresses", parseAddresses(u.Object, "status", "addresses"),
 	)
 }
 
 func parseListeners(u *unstructured.Unstructured) []gwListener {
-	slice, _, _ := unstructured.NestedSlice(u.Object, "spec", "listeners")
+	slice := uSlice(u.Object, "spec", "listeners")
 	out := make([]gwListener, 0, len(slice))
 	for _, x := range slice {
 		m, ok := x.(map[string]any)
 		if !ok {
 			continue
 		}
-		var l gwListener
-		l.Name, _, _ = unstructured.NestedString(m, "name")
-		if p, found, _ := unstructured.NestedInt64(m, "port"); found {
-			l.Port = int32(p)
-		}
-		l.Protocol, _, _ = unstructured.NestedString(m, "protocol")
-		l.Hostname, _, _ = unstructured.NestedString(m, "hostname")
-		out = append(out, l)
+		out = append(out, gwListener{
+			Name:     uStr(m, "name"),
+			Port:     uInt32(m, "port"),
+			Protocol: uStr(m, "protocol"),
+			Hostname: uStr(m, "hostname"),
+		})
 	}
 	return out
 }
 
 func parseAddresses(obj map[string]any, path ...string) []gwAddress {
-	slice, _, _ := unstructured.NestedSlice(obj, path...)
+	slice := uSlice(obj, path...)
 	out := make([]gwAddress, 0, len(slice))
 	for _, x := range slice {
 		m, ok := x.(map[string]any)
 		if !ok {
 			continue
 		}
-		var a gwAddress
-		a.Type, _, _ = unstructured.NestedString(m, "type")
-		a.Value, _, _ = unstructured.NestedString(m, "value")
-		out = append(out, a)
+		out = append(out, gwAddress{Type: uStr(m, "type"), Value: uStr(m, "value")})
 	}
 	return out
 }
@@ -242,7 +188,6 @@ func parseAddresses(obj map[string]any, path ...string) []gwAddress {
 // ---------- GatewayClass --------------------------------------------------
 
 func emitGatewayClass(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
-	controller, _, _ := unstructured.NestedString(u.Object, "spec", "controllerName")
 	log.Info(event,
 		"kind", "GatewayClass",
 		"api_version", gvr.GroupVersion().String(),
@@ -250,7 +195,7 @@ func emitGatewayClass(event string, gvr schema.GroupVersionResource, u *unstruct
 		"uid", string(u.GetUID()),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
-		"controller", controller,
+		"controller", uStr(u.Object, "spec", "controllerName"),
 	)
 }
 
@@ -275,9 +220,6 @@ type backendRef struct {
 }
 
 func emitRoute(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured, kind string) {
-	parents := parseParentRefs(u)
-	hostnames, _, _ := unstructured.NestedStringSlice(u.Object, "spec", "hostnames")
-	backends := collectRouteBackends(u)
 	log.Info(event,
 		"kind", kind,
 		"api_version", gvr.GroupVersion().String(),
@@ -286,30 +228,28 @@ func emitRoute(event string, gvr schema.GroupVersionResource, u *unstructured.Un
 		"namespace", u.GetNamespace(),
 		"name", u.GetName(),
 		"labels", u.GetLabels(),
-		"parent_refs", parents,
-		"hostnames", hostnames,
-		"backends", backends,
+		"parent_refs", parseParentRefs(u),
+		"hostnames", uStringSlice(u.Object, "spec", "hostnames"),
+		"backends", collectRouteBackends(u),
 	)
 }
 
 func parseParentRefs(u *unstructured.Unstructured) []parentRef {
-	slice, _, _ := unstructured.NestedSlice(u.Object, "spec", "parentRefs")
+	slice := uSlice(u.Object, "spec", "parentRefs")
 	out := make([]parentRef, 0, len(slice))
 	for _, x := range slice {
 		m, ok := x.(map[string]any)
 		if !ok {
 			continue
 		}
-		var p parentRef
-		p.Group, _, _ = unstructured.NestedString(m, "group")
-		p.Kind, _, _ = unstructured.NestedString(m, "kind")
-		p.Namespace, _, _ = unstructured.NestedString(m, "namespace")
-		p.Name, _, _ = unstructured.NestedString(m, "name")
-		p.SectionName, _, _ = unstructured.NestedString(m, "sectionName")
-		if n, found, _ := unstructured.NestedInt64(m, "port"); found {
-			p.Port = int32(n)
-		}
-		out = append(out, p)
+		out = append(out, parentRef{
+			Group:       uStr(m, "group"),
+			Kind:        uStr(m, "kind"),
+			Namespace:   uStr(m, "namespace"),
+			Name:        uStr(m, "name"),
+			SectionName: uStr(m, "sectionName"),
+			Port:        uInt32(m, "port"),
+		})
 	}
 	return out
 }
@@ -319,31 +259,25 @@ func parseParentRefs(u *unstructured.Unstructured) []parentRef {
 // server-side from the raw object if needed later). We only need the
 // reference set for "which Services get traffic via this route".
 func collectRouteBackends(u *unstructured.Unstructured) []backendRef {
-	rules, _, _ := unstructured.NestedSlice(u.Object, "spec", "rules")
 	var out []backendRef
-	for _, r := range rules {
+	for _, r := range uSlice(u.Object, "spec", "rules") {
 		rm, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		refs, _, _ := unstructured.NestedSlice(rm, "backendRefs")
-		for _, x := range refs {
+		for _, x := range uSlice(rm, "backendRefs") {
 			m, ok := x.(map[string]any)
 			if !ok {
 				continue
 			}
-			var b backendRef
-			b.Group, _, _ = unstructured.NestedString(m, "group")
-			b.Kind, _, _ = unstructured.NestedString(m, "kind")
-			b.Namespace, _, _ = unstructured.NestedString(m, "namespace")
-			b.Name, _, _ = unstructured.NestedString(m, "name")
-			if n, found, _ := unstructured.NestedInt64(m, "port"); found {
-				b.Port = int32(n)
-			}
-			if n, found, _ := unstructured.NestedInt64(m, "weight"); found {
-				b.Weight = int32(n)
-			}
-			out = append(out, b)
+			out = append(out, backendRef{
+				Group:     uStr(m, "group"),
+				Kind:      uStr(m, "kind"),
+				Namespace: uStr(m, "namespace"),
+				Name:      uStr(m, "name"),
+				Port:      uInt32(m, "port"),
+				Weight:    uInt32(m, "weight"),
+			})
 		}
 	}
 	return out
