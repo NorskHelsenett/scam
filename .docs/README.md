@@ -29,6 +29,7 @@ the metadata pump feeding that system.
 | [`records.md`](records.md) | Consumers of the log stream — schema and examples for every emitted record kind |
 | [`spam.md`](spam.md) | Implementers on the `spam` side — what needs to be built to turn this stream into a graph |
 | [`operations.md`](operations.md) | Deploying, configuring, observing, upgrading |
+| [`plan.md`](plan.md) | Decision log: auth model, hijack threat mitigations, rollout order, open questions |
 
 ## Repo layout
 

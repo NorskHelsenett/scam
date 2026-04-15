@@ -80,7 +80,72 @@ Labels you want:
 - `org.opencontainers.image.revision` — commit SHA. Lets you bind to a
   specific `RepoCommit`.
 - `org.opencontainers.image.version`, `.created`, `.title`,
-  `.description` — nice to have.
+  `.description`, `.url`, `.licenses` — nice to have.
+
+### Reference: what the labels actually look like
+
+Our own images are a worked example. `skopeo inspect` reads the image
+config blob straight from the registry (no pull, no daemon) and emits
+`.Labels` as JSON:
+
+```sh
+skopeo inspect docker://git.torden.tech/jonasbg/spam | jq '.Labels'
+```
+```json
+{
+  "org.opencontainers.image.created":     "2026-03-19T12:51:12.435Z",
+  "org.opencontainers.image.description": "",
+  "org.opencontainers.image.licenses":    "",
+  "org.opencontainers.image.revision":    "b61da4b314b1d9f4bd309a2a1c6a14b4d5808c09",
+  "org.opencontainers.image.source":      "https://git.torden.tech/jonasbg/spam",
+  "org.opencontainers.image.title":       "spam",
+  "org.opencontainers.image.url":         "https://git.torden.tech/jonasbg/spam",
+  "org.opencontainers.image.version":     "main"
+}
+```
+
+Join chain from there:
+`.source = https://git.torden.tech/jonasbg/spam` → match against
+`ProviderInstance.BaseURL = git.torden.tech` → locate/create
+`Repo{provider, org: "jonasbg", slug: "spam"}` → set
+`ImageDigest.repo_binding_id = Repo.id`. Then `.revision` gives the commit
+SHA for hooking to a `RepoCommit`.
+
+### Implementation options for `OCI_LABEL_RESOLVE`
+
+Pick one, not all. All three produce the same `config.Labels` map:
+
+| Approach | Pros | Cons |
+|---|---|---|
+| Shell out to `skopeo inspect --no-tags docker://{registry}/{image}@{digest}` | Trivial to prototype; matches the reference snippet above verbatim | External binary dep in the spam runner image; auth via `--creds` / `$REGISTRY_AUTH_FILE`; subprocess overhead |
+| Go lib `github.com/google/go-containerregistry` (crane) | Pure Go, tiny, no cgo, same API as `gcrane`/`crane` | Need to wire a `Keychain` for registry auth |
+| Go lib `github.com/containers/image` (skopeo's library) | Most feature-complete (signatures, sigstore, rich formats) | Heavier, pulls in a lot of transitive deps |
+
+For spam's central resolver I'd default to `go-containerregistry`. Example
+shape for the worker handler:
+
+```go
+ref, _ := name.NewDigest(fmt.Sprintf("%s/%s@%s", registry, image, digest))
+img, _ := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+cfg, _ := img.ConfigFile()
+labels := cfg.Config.Labels  // map[string]string — persist as-is to image_digests.oci_labels
+```
+
+Notes:
+
+- **Cache by digest, not tag.** Digests are content-addressed → one fetch
+  per unique digest, ever. If a repo pushes a new digest with the same
+  tag, the operator emits the new digest; spam resolves the new row.
+- **Multi-arch manifests.** A tag can point to a manifest list; the
+  operator already emits the per-platform digest the kubelet resolved, so
+  config-by-digest fetch gives you the right platform's labels directly.
+- **Missing labels are fine.** Not every image sets `image.source` — base
+  images, distroless, scratch, third-party tags. Leave `repo_binding_id`
+  NULL and expose "unlinked" as a UI filter. Admin can still manually
+  bind.
+- **Stale `revision` label.** If the image was built from a dirty tree
+  the label is whatever the build tool wrote. Trust it for grouping, not
+  for provenance claims.
 
 ## 4. Exposure graph computation
 
