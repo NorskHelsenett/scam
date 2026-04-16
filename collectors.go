@@ -7,6 +7,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	appsinformers "k8s.io/client-go/informers/apps/v1"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	netinformers "k8s.io/client-go/informers/networking/v1"
 	"k8s.io/client-go/tools/cache"
@@ -21,6 +22,7 @@ import (
 var refs struct {
 	services    coreinformers.ServiceInformer
 	ingresses   netinformers.IngressInformer
+	replicaSets appsinformers.ReplicaSetInformer
 	gwInformers map[string]cache.SharedIndexInformer // Gateway API, keyed by gvr.String()
 	trInformers map[string]cache.SharedIndexInformer // Traefik, keyed by gvr.String()
 }
@@ -53,15 +55,30 @@ func lessPod(a, b *corev1.Pod) bool {
 }
 
 func podOwner(p *corev1.Pod) (string, string) {
+	kind, name := "-", "-"
 	for _, o := range p.OwnerReferences {
 		if o.Controller != nil && *o.Controller {
-			return o.Kind, o.Name
+			kind, name = o.Kind, o.Name
+			break
 		}
 	}
-	if len(p.OwnerReferences) > 0 {
-		return p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name
+	if kind == "-" && len(p.OwnerReferences) > 0 {
+		kind, name = p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name
 	}
-	return "-", "-"
+	// Resolve ReplicaSet → Deployment so the owner name matches the
+	// Deployment (and therefore the backend Service name used in Ingress
+	// rules) rather than the ephemeral ReplicaSet with its hash suffix.
+	if kind == "ReplicaSet" && refs.replicaSets != nil {
+		if rs, err := refs.replicaSets.Lister().ReplicaSets(p.Namespace).Get(name); err == nil {
+			for _, o := range rs.OwnerReferences {
+				if o.Controller != nil && *o.Controller {
+					kind, name = o.Kind, o.Name
+					break
+				}
+			}
+		}
+	}
+	return kind, name
 }
 
 type containerRef struct {

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"unicode/utf8"
 
 	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -115,14 +116,7 @@ func main() {
 	log = log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
-	fmt.Fprintln(os.Stderr, "┌─────────────────────────────────────────────")
-	fmt.Fprintln(os.Stderr, "│ SCAM — SPAM Cluster Agent Metadata")
-	fmt.Fprintln(os.Stderr, "├─────────────────────────────────────────────")
-	fmt.Fprintf(os.Stderr, "│  cluster:     %s\n", clusterName)
-	fmt.Fprintf(os.Stderr, "│  cluster_id:  %s\n", clusterID)
-	fmt.Fprintf(os.Stderr, "│  environment: %s\n", environment)
-	fmt.Fprintf(os.Stderr, "│  callcenter:  %s\n", callcenterURL)
-	fmt.Fprintln(os.Stderr, "└─────────────────────────────────────────────")
+	printBanner(clusterName, clusterID, environment, callcenterURL)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -154,6 +148,12 @@ func main() {
 		func(event string, newP, oldP *corev1.Pod) { emitPod(event, newP, oldP) },
 		emitPodDelete,
 	)
+
+	// ReplicaSet informer — used only as a lister so podOwner() can resolve
+	// the ReplicaSet → Deployment owner chain. No event handlers needed.
+	rsInf := factory.Apps().V1().ReplicaSets()
+	_ = rsInf.Informer().SetTransform(trimReplicaSet)
+	refs.replicaSets = rsInf
 
 	svcInf := factory.Core().V1().Services()
 	_ = svcInf.Informer().SetTransform(trimService)
@@ -282,6 +282,37 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutdown")
+}
+
+func printBanner(clusterName, clusterID, environment, callcenterURL string) {
+	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
+	lines := []string{
+		fmt.Sprintf("cluster:     %s", clusterName),
+		fmt.Sprintf("cluster_id:  %s", clusterID),
+		fmt.Sprintf("environment: %s", environment),
+		fmt.Sprintf("callcenter:  %s", callcenterURL),
+	}
+
+	maxW := utf8.RuneCountInString(title)
+	for _, l := range lines {
+		if w := utf8.RuneCountInString(l); w > maxW {
+			maxW = w
+		}
+	}
+
+	hr := strings.Repeat("\u2500", maxW+2)
+	pad := func(s string) string {
+		return s + strings.Repeat(" ", maxW-utf8.RuneCountInString(s))
+	}
+
+	fmt.Fprintf(os.Stderr, "\u250c%s\u2510\n", hr)
+	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(title))
+	fmt.Fprintf(os.Stderr, "\u251c%s\u2524\n", hr)
+	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(""))
+	for _, l := range lines {
+		fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(l))
+	}
+	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
 }
 
 // loadConfig tries in-cluster first, then falls back to kubeconfig.

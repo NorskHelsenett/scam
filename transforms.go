@@ -1,6 +1,7 @@
 package main
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,6 +68,22 @@ func trimService(obj any) (any, error) {
 	s.Finalizers = nil
 	s.Status.Conditions = nil
 	return s, nil
+}
+
+// trimReplicaSet strips everything except OwnerReferences — the only field
+// podOwner() reads when resolving ReplicaSet → Deployment.
+func trimReplicaSet(obj any) (any, error) {
+	rs, ok := obj.(*appsv1.ReplicaSet)
+	if !ok {
+		return obj, nil
+	}
+	rs.Annotations = nil
+	rs.ManagedFields = nil
+	rs.Finalizers = nil
+	rs.Labels = nil
+	rs.Spec = appsv1.ReplicaSetSpec{}
+	rs.Status = appsv1.ReplicaSetStatus{}
+	return rs, nil
 }
 
 func trimIngress(obj any) (any, error) {
