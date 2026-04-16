@@ -1,0 +1,125 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - '**'
+  pull_request:
+
+env:
+  REGISTRY: git.torden.tech
+  REGISTRY_PATH: jonasbg/spam-agent
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}
+
+      - name: Determine image tags
+        id: tags
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${IMAGE}:latest,${IMAGE}:$(date '+%Y%m%d')"
+          else
+            TAGS="${IMAGE}:dev"
+          fi
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            build.buildnumber=${{ github.run_id }}
+            build.builduri=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            build.project.uri=${{ github.server_url }}/${{ github.repository }}
+            build.project.name=${{ github.repository }}
+            build.repository.name=${{ github.event.repository.name }}
+            build.repository.branch=${{ github.ref_name }}
+            build.repository.commithash=${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}:buildcache,mode=max
+
+  helm-push:
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'push'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Log in to Helm Registry
+        run: |
+          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ env.REGISTRY }} -u "${{ github.actor }}" --password-stdin
+
+      - name: Determine Helm repository
+        id: helm-repo
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "repo=${{ env.REGISTRY_PATH }}/helm" >> $GITHUB_OUTPUT
+            echo "tag_suffix=$(date '+%Y%m%d')" >> $GITHUB_OUTPUT
+          else
+            echo "repo=${{ env.REGISTRY_PATH }}/dev" >> $GITHUB_OUTPUT
+            echo "tag_suffix=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update and push Helm chart
+        env:
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          TAG_SUFFIX: ${{ steps.helm-repo.outputs.tag_suffix }}
+          HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
+        run: |
+          CHART_DIR=".cluster/spam-agent"
+          CHART_NAME="spam-agent"
+
+          # Pull current chart to get version
+          helm pull oci://${{ env.REGISTRY }}/${HELM_REPO}/${CHART_NAME} || echo "No existing chart found"
+
+          if ls ${CHART_NAME}-*.tgz 1>/dev/null 2>&1; then
+            file=$(ls ${CHART_NAME}-*.tgz)
+            CURRENT_VERSION=$(echo $file | sed "s/${CHART_NAME}-\([0-9]\+\.[0-9]\+\.[0-9]\+\).tgz/\1/")
+            NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. '{print $1"."$2"."$3+1}')
+          else
+            NEW_VERSION="0.1.0"
+          fi
+
+          echo "NEW CHART VERSION: $NEW_VERSION"
+
+          # Update Chart.yaml version
+          yq e -i ".version = \"$NEW_VERSION\"" ${CHART_DIR}/Chart.yaml
+
+          # Update values.yaml with image tag and digest
+          IMAGE_TAG="${TAG_SUFFIX}@${IMAGE_DIGEST}"
+          yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
+
+          # Package and push
+          helm package ${CHART_DIR}
+          helm push "${CHART_NAME}-${NEW_VERSION}.tgz" oci://${{ env.REGISTRY }}/${HELM_REPO}

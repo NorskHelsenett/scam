@@ -1,0 +1,21 @@
+replicaCount: 1
+
+image:
+  repository: git.torden.tech/jonasbg/spam-agent
+  tag: latest
+  pullPolicy: Always
+
+clusterName: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+serviceAccount:
+  create: true
+
+rbac:
+  create: true
