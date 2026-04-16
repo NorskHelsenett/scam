@@ -20,7 +20,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods", "services"]
+    resources: ["namespaces", "nodes", "pods", "services"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]
