@@ -1,17 +1,3 @@
-// scam (SPAM Cluster Agent Metadata) watches cluster metadata (Pods + their container images and
-// the exposure chain: Service, Ingress, IngressClass, EndpointSlice, and
-// Gateway API resources when installed) and emits per-object JSON records
-// on stdout for later ingest.
-//
-// It's a dumb collector. It does not join, does not classify local-vs-public
-// IPs, and does not resolve OCI image labels. Those decisions live in the
-// ingesting system so rule changes don't require redeploying N operators.
-//
-// Memory is kept low by:
-//   - disabling resync (no periodic full relists)
-//   - per-informer transform functions that strip unread fields from cached
-//     objects (annotations, managed fields, volumes, env, probes, ...)
-//   - not keeping any parallel cache of state in this process
 package main
 
 import (
@@ -29,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
+	"github.com/NorskHelsenett/scam/internal/collector"
+
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,11 +32,6 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
-var (
-	log     = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	capture *lineCapture // non-nil when SPAM_URL is set
-)
-
 func main() {
 	var kubeconfig string
 	defaultKC := ""
@@ -58,16 +41,13 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", defaultKC, "path to kubeconfig (ignored in-cluster)")
 	flag.Parse()
 
-	// If CALLCENTER_URL is set, tee slog output to a buffer for periodic push.
+	// CALLCENTER_URL is resolved after cluster identity detection so
+	// the push loop can be started with the fully-configured logger.
 	callcenterURL := strings.TrimSpace(os.Getenv("CALLCENTER_URL"))
-	if callcenterURL != "" {
-		capture = &lineCapture{stdout: os.Stdout}
-		log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
-	}
 
 	cfg, err := loadConfig(kubeconfig)
 	if err != nil {
-		log.Error("load kube config", "err", err)
+		collector.Log.Error("load kube config", "err", err)
 		os.Exit(1)
 	}
 	cfg.QPS = 5
@@ -75,15 +55,11 @@ func main() {
 
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		log.Error("build clientset", "err", err)
+		collector.Log.Error("build clientset", "err", err)
 		os.Exit(1)
 	}
 
 	// ---- cluster identity (auto-detected from node metadata) ---------------
-	//
-	// The interregator inspects node labels to infer provider, cluster name,
-	// etc. Env vars override when set so operators can pin values without
-	// depending on the detection logic.
 	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
 
 	clusterID := ci.GetClusterId()
@@ -113,28 +89,34 @@ func main() {
 	if environment != "" {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
-	log = log.With(clusterAttrs...)
+	collector.Log = collector.Log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
 	printBanner(clusterName, clusterID, environment, callcenterURL)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		log.Error("build dynamic client", "err", err)
+		collector.Log.Error("build dynamic client", "err", err)
 		os.Exit(1)
 	}
 	discClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		log.Error("build discovery client", "err", err)
+		collector.Log.Error("build discovery client", "err", err)
 		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if capture != nil {
+	// Re-resolve capture for push loop now that logger is configured.
+	if callcenterURL != "" {
+		// Reconstruct capture from the logger's writer. Since we set it above,
+		// just create a fresh one with the configured logger.
+		capture := &collector.LineCapture{Stdout: os.Stdout}
+		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+		collector.Log = collector.Log.With(clusterAttrs...)
 		endpoint := strings.TrimRight(callcenterURL, "/") + "/api/scam/callcenter"
-		go pushLoop(ctx, endpoint, capture)
+		go collector.PushLoop(ctx, endpoint, capture)
 	}
 
 	var synced atomic.Bool
@@ -143,49 +125,49 @@ func main() {
 	factory := informers.NewSharedInformerFactoryWithOptions(clientset, 0)
 
 	podInf := factory.Core().V1().Pods()
-	_ = podInf.Informer().SetTransform(trimPod)
-	onEvents(podInf.Informer(), &synced,
-		func(event string, newP, oldP *corev1.Pod) { emitPod(event, newP, oldP) },
-		emitPodDelete,
+	_ = podInf.Informer().SetTransform(collector.TrimPod)
+	collector.OnEvents(podInf.Informer(), &synced,
+		func(event string, newP, oldP *corev1.Pod) { collector.EmitPod(event, newP, oldP) },
+		collector.EmitPodDelete,
 	)
 
-	// ReplicaSet informer — used only as a lister so podOwner() can resolve
+	// ReplicaSet informer — used only as a lister so PodOwner() can resolve
 	// the ReplicaSet → Deployment owner chain. No event handlers needed.
 	rsInf := factory.Apps().V1().ReplicaSets()
-	_ = rsInf.Informer().SetTransform(trimReplicaSet)
-	refs.replicaSets = rsInf
+	_ = rsInf.Informer().SetTransform(collector.TrimReplicaSet)
+	collector.Refs.ReplicaSets = rsInf
 
 	svcInf := factory.Core().V1().Services()
-	_ = svcInf.Informer().SetTransform(trimService)
-	onEvents(svcInf.Informer(), &synced,
-		func(event string, s, _ *corev1.Service) { emitService(event, s) },
-		emitServiceDelete,
+	_ = svcInf.Informer().SetTransform(collector.TrimService)
+	collector.OnEvents(svcInf.Informer(), &synced,
+		func(event string, s, _ *corev1.Service) { collector.EmitService(event, s) },
+		collector.EmitServiceDelete,
 	)
 
 	ingInf := factory.Networking().V1().Ingresses()
-	_ = ingInf.Informer().SetTransform(trimIngress)
-	_ = ingInf.Informer().AddIndexers(cache.Indexers{backendIndexName: ingressBackendKeys})
-	onEvents(ingInf.Informer(), &synced,
+	_ = ingInf.Informer().SetTransform(collector.TrimIngress)
+	_ = ingInf.Informer().AddIndexers(cache.Indexers{collector.BackendIndexName: collector.IngressBackendKeys})
+	collector.OnEvents(ingInf.Informer(), &synced,
 		func(event string, i, _ *networkingv1.Ingress) {
-			emitIngress(event, i)
-			refreshBackendServices(ingressBackends(i))
+			collector.EmitIngress(event, i)
+			collector.RefreshBackendServices(collector.IngressBackends(i))
 		},
-		emitIngressDelete,
+		collector.EmitIngressDelete,
 	)
 
 	icInf := factory.Networking().V1().IngressClasses()
-	_ = icInf.Informer().SetTransform(trimMeta)
-	onEvents(icInf.Informer(), &synced,
-		func(event string, ic, _ *networkingv1.IngressClass) { emitIngressClass(event, ic) },
-		emitIngressClassDelete,
+	_ = icInf.Informer().SetTransform(collector.TrimMeta)
+	collector.OnEvents(icInf.Informer(), &synced,
+		func(event string, ic, _ *networkingv1.IngressClass) { collector.EmitIngressClass(event, ic) },
+		collector.EmitIngressClassDelete,
 	)
 
-	// ---- Gateway API + Traefik via dynamic informers, each only if CRDs are installed ---
+	// ---- Gateway API + Traefik via dynamic informers ---
 	var dynFactory dynamicinformer.DynamicSharedInformerFactory
 
-	gwGVRs := discoverGatewayAPI(discClient)
+	gwGVRs := collector.DiscoverGatewayAPI(discClient)
 	gwInformers := map[string]cache.SharedIndexInformer{}
-	trGVRs := discoverTraefik(discClient)
+	trGVRs := collector.DiscoverTraefik(discClient)
 	trInformers := map[string]cache.SharedIndexInformer{}
 
 	if len(gwGVRs) > 0 || len(trGVRs) > 0 {
@@ -194,44 +176,44 @@ func main() {
 	if len(gwGVRs) > 0 {
 		for _, gvr := range gwGVRs {
 			inf := dynFactory.ForResource(gvr).Informer()
-			_ = inf.SetTransform(trimUnstructured)
-			if isRouteGVR(gvr) {
-				_ = inf.AddIndexers(cache.Indexers{backendIndexName: routeBackendKeys})
+			_ = inf.SetTransform(collector.TrimUnstructured)
+			if collector.IsRouteGVR(gvr) {
+				_ = inf.AddIndexers(cache.Indexers{collector.BackendIndexName: collector.RouteBackendKeys})
 			}
-			onEvents(inf, &synced,
+			collector.OnEvents(inf, &synced,
 				func(event string, u, _ *unstructured.Unstructured) {
-					emitGatewayAPI(event, gvr, u)
-					if isRouteGVR(gvr) {
-						refreshBackendServices(routeBackends(u))
+					collector.EmitGatewayAPI(event, gvr, u)
+					if collector.IsRouteGVR(gvr) {
+						collector.RefreshBackendServices(collector.RouteBackends(u))
 					}
 				},
-				func(u *unstructured.Unstructured) { emitGatewayAPIDelete(gvr, u) },
+				func(u *unstructured.Unstructured) { collector.EmitGatewayAPIDelete(gvr, u) },
 			)
 			gwInformers[gvr.String()] = inf
 		}
-		refs.gwInformers = gwInformers
-		log.Info("gateway API detected", "resources", gvrStrings(gwGVRs))
+		collector.Refs.GWInformers = gwInformers
+		collector.Log.Info("gateway API detected", "resources", collector.GvrStrings(gwGVRs))
 	} else {
-		log.Info("gateway API CRDs not installed; skipping")
+		collector.Log.Info("gateway API CRDs not installed; skipping")
 	}
 	if len(trGVRs) > 0 {
 		for _, gvr := range trGVRs {
 			inf := dynFactory.ForResource(gvr).Informer()
-			_ = inf.SetTransform(trimUnstructured)
-			_ = inf.AddIndexers(cache.Indexers{backendIndexName: traefikBackendKeys})
-			onEvents(inf, &synced,
+			_ = inf.SetTransform(collector.TrimUnstructured)
+			_ = inf.AddIndexers(cache.Indexers{collector.BackendIndexName: collector.TraefikBackendKeys})
+			collector.OnEvents(inf, &synced,
 				func(event string, u, _ *unstructured.Unstructured) {
-					emitTraefik(event, gvr, u)
-					refreshBackendServices(traefikBackends(u))
+					collector.EmitTraefik(event, gvr, u)
+					collector.RefreshBackendServices(collector.TraefikBackends(u))
 				},
-				func(u *unstructured.Unstructured) { emitTraefikDelete(gvr, u) },
+				func(u *unstructured.Unstructured) { collector.EmitTraefikDelete(gvr, u) },
 			)
 			trInformers[gvr.String()] = inf
 		}
-		refs.trInformers = trInformers
-		log.Info("traefik CRDs detected", "resources", gvrStrings(trGVRs))
+		collector.Refs.TRInformers = trInformers
+		collector.Log.Info("traefik CRDs detected", "resources", collector.GvrStrings(trGVRs))
 	} else {
-		log.Info("traefik CRDs not installed; skipping")
+		collector.Log.Info("traefik CRDs not installed; skipping")
 	}
 
 	// ---- start + wait for sync -----------------------------------------
@@ -240,14 +222,13 @@ func main() {
 		dynFactory.Start(ctx.Done())
 	}
 
-	// Stash informers we need to cross-reference (exposure chain lookups) so
-	// emit functions can check "is this Service/Pod reachable from outside?".
-	refs.services = svcInf
-	refs.ingresses = ingInf
+	collector.Refs.Services = svcInf
+	collector.Refs.Ingresses = ingInf
 
-	log.Info("waiting for cache sync")
+	collector.Log.Info("waiting for cache sync")
 	syncs := []cache.InformerSynced{
 		podInf.Informer().HasSynced,
+		rsInf.Informer().HasSynced,
 		svcInf.Informer().HasSynced,
 		ingInf.Informer().HasSynced,
 		icInf.Informer().HasSynced,
@@ -259,38 +240,36 @@ func main() {
 		syncs = append(syncs, inf.HasSynced)
 	}
 	if !cache.WaitForCacheSync(ctx.Done(), syncs...) {
-		log.Error("cache sync aborted")
+		collector.Log.Error("cache sync aborted")
 		os.Exit(1)
 	}
 
 	// ---- initial sorted snapshot per kind ------------------------------
-	dumpPods(podInf)
-	// Route-bearing resources before Services so exposure-reference lookups
-	// find routes in-cache when we filter ClusterIP services.
+	collector.DumpPods(podInf)
 	for _, gvr := range gwGVRs {
-		dumpGatewayAPI(gvr, gwInformers[gvr.String()])
+		collector.DumpGatewayAPI(gvr, gwInformers[gvr.String()])
 	}
 	for _, gvr := range trGVRs {
-		dumpTraefik(gvr, trInformers[gvr.String()])
+		collector.DumpTraefik(gvr, trInformers[gvr.String()])
 	}
-	dumpIngresses(ingInf)
-	dumpIngressClasses(icInf)
-	dumpServices(svcInf)
+	collector.DumpIngresses(ingInf)
+	collector.DumpIngressClasses(icInf)
+	collector.DumpServices(svcInf)
 
 	synced.Store(true)
-	log.Info("streaming events")
+	collector.Log.Info("streaming events")
 
 	<-ctx.Done()
-	log.Info("shutdown")
+	collector.Log.Info("shutdown")
 }
 
-func printBanner(clusterName, clusterID, environment, callcenterURL string) {
+func printBanner(clusterName, clusterID, environment, callcenter string) {
 	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
 	lines := []string{
 		fmt.Sprintf("cluster:     %s", clusterName),
 		fmt.Sprintf("cluster_id:  %s", clusterID),
 		fmt.Sprintf("environment: %s", environment),
-		fmt.Sprintf("callcenter:  %s", callcenterURL),
+		fmt.Sprintf("callcenter:  %s", callcenter),
 	}
 
 	maxW := utf8.RuneCountInString(title)
@@ -315,7 +294,6 @@ func printBanner(clusterName, clusterID, environment, callcenterURL string) {
 	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
 }
 
-// loadConfig tries in-cluster first, then falls back to kubeconfig.
 func loadConfig(kubeconfig string) (*rest.Config, error) {
 	if c, err := rest.InClusterConfig(); err == nil {
 		return c, nil

@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	appsv1 "k8s.io/api/apps/v1"
@@ -10,12 +10,8 @@ import (
 
 // Transforms strip fields we never read before objects enter the informer
 // cache. They mutate in place; the informer owns the object from here on.
-//
-// Transforms are also called on Update events, which means any field nil'd
-// here will already be nil for both the "old" and "new" objects seen by
-// UpdateFunc — so comparing old and new only reflects fields we actually keep.
 
-func trimPod(obj any) (any, error) {
+func TrimPod(obj any) (any, error) {
 	p, ok := obj.(*corev1.Pod)
 	if !ok {
 		return obj, nil
@@ -58,7 +54,7 @@ func trimPod(obj any) (any, error) {
 	return p, nil
 }
 
-func trimService(obj any) (any, error) {
+func TrimService(obj any) (any, error) {
 	s, ok := obj.(*corev1.Service)
 	if !ok {
 		return obj, nil
@@ -70,9 +66,20 @@ func trimService(obj any) (any, error) {
 	return s, nil
 }
 
-// trimReplicaSet strips everything except OwnerReferences — the only field
-// podOwner() reads when resolving ReplicaSet → Deployment.
-func trimReplicaSet(obj any) (any, error) {
+func TrimIngress(obj any) (any, error) {
+	i, ok := obj.(*networkingv1.Ingress)
+	if !ok {
+		return obj, nil
+	}
+	i.Annotations = nil
+	i.ManagedFields = nil
+	i.Finalizers = nil
+	return i, nil
+}
+
+// TrimReplicaSet strips everything except OwnerReferences — the only field
+// PodOwner reads when resolving ReplicaSet → Deployment.
+func TrimReplicaSet(obj any) (any, error) {
 	rs, ok := obj.(*appsv1.ReplicaSet)
 	if !ok {
 		return obj, nil
@@ -86,20 +93,9 @@ func trimReplicaSet(obj any) (any, error) {
 	return rs, nil
 }
 
-func trimIngress(obj any) (any, error) {
-	i, ok := obj.(*networkingv1.Ingress)
-	if !ok {
-		return obj, nil
-	}
-	i.Annotations = nil
-	i.ManagedFields = nil
-	i.Finalizers = nil
-	return i, nil
-}
-
-// trimMeta is a generic small transform for objects where we only read
+// TrimMeta is a generic small transform for objects where we only read
 // identity + a couple of spec fields (e.g., IngressClass, GatewayClass).
-func trimMeta(obj any) (any, error) {
+func TrimMeta(obj any) (any, error) {
 	if o, ok := obj.(metav1.Object); ok {
 		o.SetAnnotations(nil)
 		o.SetManagedFields(nil)
@@ -108,7 +104,7 @@ func trimMeta(obj any) (any, error) {
 	return obj, nil
 }
 
-func trimUnstructured(obj any) (any, error) {
+func TrimUnstructured(obj any) (any, error) {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return obj, nil
@@ -116,9 +112,6 @@ func trimUnstructured(obj any) (any, error) {
 	u.SetAnnotations(nil)
 	u.SetManagedFields(nil)
 	u.SetFinalizers(nil)
-	// status on routes/gateways churns hard (per-parent conditions, listener
-	// attach state). We never emit any of it, so drop it wholesale. Gateway
-	// status.addresses is what we read; keep only that.
 	unstructured.RemoveNestedField(u.Object, "status", "conditions")
 	unstructured.RemoveNestedField(u.Object, "status", "listeners")
 	unstructured.RemoveNestedField(u.Object, "status", "parents")

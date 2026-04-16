@@ -7,12 +7,13 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
-COPY *.go ./
+COPY cmd/ cmd/
+COPY internal/ internal/
 ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/scam .
+    go build -trimpath -ldflags="-s -w" -o /out/scam ./cmd/scam
 
 FROM scratch
 ENV GOGC=50 GOMEMLIMIT=96MiB

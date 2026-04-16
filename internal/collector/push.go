@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	"bytes"
@@ -11,24 +11,22 @@ import (
 )
 
 const (
-	pushInterval   = 30 * time.Second
+	PushInterval   = 30 * time.Second
 	maxBackoff     = 5 * time.Minute
-	maxBufferSize  = 10_000 // drop oldest records beyond this
-	pushBatchLimit = 2_000  // max records per POST
+	maxBufferSize  = 10_000
+	pushBatchLimit = 2_000
 )
 
-// lineCapture is an io.Writer that always writes to stdout and additionally
+// LineCapture is an io.Writer that always writes to stdout and additionally
 // buffers each JSON line for periodic push to SPAM.
-type lineCapture struct {
-	stdout io.Writer
+type LineCapture struct {
+	Stdout io.Writer
 	mu     sync.Mutex
 	buf    []json.RawMessage
 }
 
-func (lc *lineCapture) Write(p []byte) (int, error) {
-	// Always write to stdout first.
-	n, err := lc.stdout.Write(p)
-
+func (lc *LineCapture) Write(p []byte) (int, error) {
+	n, err := lc.Stdout.Write(p)
 	trimmed := bytes.TrimSpace(p)
 	if len(trimmed) > 0 && trimmed[0] == '{' {
 		lc.mu.Lock()
@@ -42,7 +40,7 @@ func (lc *lineCapture) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (lc *lineCapture) flush() []json.RawMessage {
+func (lc *LineCapture) Flush() []json.RawMessage {
 	lc.mu.Lock()
 	lines := lc.buf
 	lc.buf = nil
@@ -50,11 +48,20 @@ func (lc *lineCapture) flush() []json.RawMessage {
 	return lines
 }
 
-// pushLoop periodically flushes captured records to the SPAM callcenter endpoint.
-// Uses exponential backoff on failure so a downed SPAM doesn't get hammered.
-func pushLoop(ctx context.Context, endpoint string, cap *lineCapture) {
+// Rebuffer puts unsent records back for retry on the next tick.
+func (lc *LineCapture) Rebuffer(records []json.RawMessage) {
+	lc.mu.Lock()
+	lc.buf = append(records, lc.buf...)
+	if len(lc.buf) > maxBufferSize {
+		lc.buf = lc.buf[len(lc.buf)-maxBufferSize:]
+	}
+	lc.mu.Unlock()
+}
+
+// PushLoop periodically flushes captured records to the SPAM callcenter endpoint.
+func PushLoop(ctx context.Context, endpoint string, cap *LineCapture) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	ticker := time.NewTicker(pushInterval)
+	ticker := time.NewTicker(PushInterval)
 	defer ticker.Stop()
 
 	backoff := time.Duration(0)
@@ -62,37 +69,29 @@ func pushLoop(ctx context.Context, endpoint string, cap *lineCapture) {
 	for {
 		select {
 		case <-ctx.Done():
-			push(client, endpoint, cap.flush())
+			push(client, endpoint, cap.Flush())
 			return
 		case <-ticker.C:
 			if backoff > 0 {
-				backoff -= pushInterval
+				backoff -= PushInterval
 				if backoff > 0 {
-					continue // still waiting out backoff
+					continue
 				}
 				backoff = 0
 			}
-			records := cap.flush()
+			records := cap.Flush()
 			if len(records) == 0 {
 				continue
 			}
 			if !pushAll(client, endpoint, records) {
-				// Re-buffer unsent records (they'll be retried next tick).
-				cap.mu.Lock()
-				cap.buf = append(records, cap.buf...)
-				if len(cap.buf) > maxBufferSize {
-					cap.buf = cap.buf[len(cap.buf)-maxBufferSize:]
-				}
-				cap.mu.Unlock()
-				// Exponential backoff: 30s → 60s → 120s → ... → 5min cap.
-				backoff = nextBackoff(backoff)
-				log.Warn("push failed, backing off", "retry_in", backoff, "endpoint", endpoint)
+				cap.Rebuffer(records)
+				backoff = NextBackoff(backoff)
+				Log.Warn("push failed, backing off", "retry_in", backoff, "endpoint", endpoint)
 			}
 		}
 	}
 }
 
-// pushAll sends records in batches, returns true if all succeeded.
 func pushAll(client *http.Client, endpoint string, records []json.RawMessage) bool {
 	for len(records) > 0 {
 		batch := records
@@ -113,25 +112,25 @@ func push(client *http.Client, endpoint string, records []json.RawMessage) bool 
 	}
 	body, err := json.Marshal(records)
 	if err != nil {
-		log.Error("push: marshal", "err", err)
+		Log.Error("push: marshal", "err", err)
 		return false
 	}
 	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
-		log.Error("push: post", "err", err)
+		Log.Error("push: post", "err", err)
 		return false
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		log.Error("push: unexpected status", "status", resp.StatusCode)
+		Log.Error("push: unexpected status", "status", resp.StatusCode)
 		return false
 	}
 	return true
 }
 
-func nextBackoff(current time.Duration) time.Duration {
+func NextBackoff(current time.Duration) time.Duration {
 	if current == 0 {
-		return pushInterval
+		return PushInterval
 	}
 	next := current * 2
 	if next > maxBackoff {
