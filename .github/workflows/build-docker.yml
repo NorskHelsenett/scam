@@ -7,9 +7,6 @@ on:
       - '**'
   pull_request:
 
-env:
-  REGISTRY: ghcr.io
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,20 +16,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ steps.registry.outputs.registry }}
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
       - name: Determine image tags
         id: tags
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}"
+          IMAGE="${{ steps.registry.outputs.registry }}/${{ github.repository }}"
           IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS="${IMAGE}:latest,${IMAGE}:$(date '+%Y%m%d')"
@@ -41,6 +50,7 @@ jobs:
           fi
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "cache=${IMAGE}:buildcache" >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Build and push image
         id: build
@@ -69,6 +79,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
       - name: Install Helm
         uses: azure/setup-helm@v3
 
@@ -79,7 +101,7 @@ jobs:
 
       - name: Log in to Helm Registry
         run: |
-          echo "${{ github.token }}" | helm registry login ${{ env.REGISTRY }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
 
       - name: Determine Helm repository
         id: helm-repo
@@ -95,6 +117,7 @@ jobs:
 
       - name: Update and push Helm chart
         env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
           IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           TAG_SUFFIX: ${{ steps.helm-repo.outputs.tag_suffix }}
           HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
@@ -103,7 +126,7 @@ jobs:
           CHART_NAME="scam"
 
           # Pull current chart to get version
-          helm pull oci://${{ env.REGISTRY }}/${HELM_REPO}/${CHART_NAME} || echo "No existing chart found"
+          helm pull oci://${REGISTRY}/${HELM_REPO}/${CHART_NAME} || echo "No existing chart found"
 
           if ls ${CHART_NAME}-*.tgz 1>/dev/null 2>&1; then
             file=$(ls ${CHART_NAME}-*.tgz)
@@ -119,11 +142,11 @@ jobs:
           yq e -i ".version = \"$NEW_VERSION\"" ${CHART_DIR}/Chart.yaml
 
           # Update values.yaml with image repository, tag, and digest
-          IMAGE_REPO="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_REPO="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE_TAG="${TAG_SUFFIX}@${IMAGE_DIGEST}"
           yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
           yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
 
           # Package and push
           helm package ${CHART_DIR}
-          helm push "${CHART_NAME}-${NEW_VERSION}.tgz" oci://${{ env.REGISTRY }}/${HELM_REPO}
+          helm push "${CHART_NAME}-${NEW_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
