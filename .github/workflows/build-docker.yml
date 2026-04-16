@@ -108,10 +108,10 @@ jobs:
         run: |
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "repo=${REPO}/helm" >> $GITHUB_OUTPUT
+            echo "repo=${REPO}" >> $GITHUB_OUTPUT
             echo "tag_suffix=$(date '+%Y%m%d')" >> $GITHUB_OUTPUT
           else
-            echo "repo=${REPO}/dev" >> $GITHUB_OUTPUT
+            echo "repo=${REPO}" >> $GITHUB_OUTPUT
             echo "tag_suffix=dev" >> $GITHUB_OUTPUT
           fi
 
@@ -125,12 +125,14 @@ jobs:
           CHART_DIR=".cluster/scam"
           CHART_NAME="scam"
 
-          # Pull current chart to get version
-          helm pull oci://${REGISTRY}/${HELM_REPO}/${CHART_NAME} || echo "No existing chart found"
+          OCI_NAME="helm"
 
-          if ls ${CHART_NAME}-*.tgz 1>/dev/null 2>&1; then
-            file=$(ls ${CHART_NAME}-*.tgz)
-            CURRENT_VERSION=$(echo $file | sed "s/${CHART_NAME}-\([0-9]\+\.[0-9]\+\.[0-9]\+\).tgz/\1/")
+          # Pull current chart to get version
+          helm pull oci://${REGISTRY}/${HELM_REPO}/${OCI_NAME} || echo "No existing chart found"
+
+          if ls ${OCI_NAME}-*.tgz 1>/dev/null 2>&1; then
+            file=$(ls ${OCI_NAME}-*.tgz)
+            CURRENT_VERSION=$(echo $file | sed "s/${OCI_NAME}-\([0-9]\+\.[0-9]\+\.[0-9]\+\).tgz/\1/")
             NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. '{print $1"."$2"."$3+1}')
           else
             NEW_VERSION="0.1.0"
@@ -138,8 +140,8 @@ jobs:
 
           echo "NEW CHART VERSION: $NEW_VERSION"
 
-          # Update Chart.yaml version
-          yq e -i ".version = \"$NEW_VERSION\"" ${CHART_DIR}/Chart.yaml
+          # Update Chart.yaml — set OCI artifact name and version
+          yq e -i ".name = \"$OCI_NAME\" | .version = \"$NEW_VERSION\"" ${CHART_DIR}/Chart.yaml
 
           # Update values.yaml with image repository, tag, and digest
           IMAGE_REPO="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
@@ -147,6 +149,7 @@ jobs:
           yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
           yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
 
-          # Package and push
+          # Package and push — helm appends the chart name from Chart.yaml,
+          # so pushing to oci://registry/org/scam with name=helm lands at scam/helm
           helm package ${CHART_DIR}
-          helm push "${CHART_NAME}-${NEW_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
+          helm push "${OCI_NAME}-${NEW_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
