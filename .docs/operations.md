@@ -118,6 +118,6 @@ go vet ./...
 Image build (amd64, even on arm64 hosts):
 
 ```sh
-podman build --platform linux/amd64 -t git.torden.tech/jonasbg/scam:latest .
-podman push git.torden.tech/jonasbg/scam:latest
+podman build --platform linux/amd64 -t ghcr.io/norskhelsenett/scam:latest .
+podman push ghcr.io/norskhelsenett/scam:latest
 ```

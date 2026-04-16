@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: git.torden.tech/jonasbg/scam
+  repository: ""
   tag: latest
   pullPolicy: Always
 

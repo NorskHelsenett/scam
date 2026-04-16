@@ -8,8 +8,7 @@ on:
   pull_request:
 
 env:
-  REGISTRY: git.torden.tech
-  REGISTRY_PATH: jonasbg/scam
+  REGISTRY: ghcr.io
 
 jobs:
   build:
@@ -28,12 +27,13 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}
+          password: ${{ github.token }}
 
       - name: Determine image tags
         id: tags
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}"
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}"
+          IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS="${IMAGE}:latest,${IMAGE}:$(date '+%Y%m%d')"
           else
@@ -57,8 +57,8 @@ jobs:
             build.repository.name=${{ github.event.repository.name }}
             build.repository.branch=${{ github.ref_name }}
             build.repository.commithash=${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REGISTRY_PATH }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache,mode=max
 
   helm-push:
     runs-on: ubuntu-latest
@@ -78,16 +78,17 @@ jobs:
 
       - name: Log in to Helm Registry
         run: |
-          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ env.REGISTRY }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | helm registry login ${{ env.REGISTRY }} -u "${{ github.actor }}" --password-stdin
 
       - name: Determine Helm repository
         id: helm-repo
         run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "repo=${{ env.REGISTRY_PATH }}/helm" >> $GITHUB_OUTPUT
+            echo "repo=${REPO}/helm" >> $GITHUB_OUTPUT
             echo "tag_suffix=$(date '+%Y%m%d')" >> $GITHUB_OUTPUT
           else
-            echo "repo=${{ env.REGISTRY_PATH }}/dev" >> $GITHUB_OUTPUT
+            echo "repo=${REPO}/dev" >> $GITHUB_OUTPUT
             echo "tag_suffix=dev" >> $GITHUB_OUTPUT
           fi
 
@@ -116,8 +117,10 @@ jobs:
           # Update Chart.yaml version
           yq e -i ".version = \"$NEW_VERSION\"" ${CHART_DIR}/Chart.yaml
 
-          # Update values.yaml with image tag and digest
+          # Update values.yaml with image repository, tag, and digest
+          IMAGE_REPO="${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE_TAG="${TAG_SUFFIX}@${IMAGE_DIGEST}"
+          yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
           yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
 
           # Package and push

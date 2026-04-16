@@ -23,7 +23,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: scam
-          image: git.torden.tech/jonasbg/scam:latest
+          image: ghcr.io/norskhelsenett/scam:latest
           imagePullPolicy: Always
           env:
             - name: CLUSTER_NAME
