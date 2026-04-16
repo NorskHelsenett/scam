@@ -1,4 +1,4 @@
-# spam-agent
+# scam — SPAM Cluster Agent Metadata
 
 One-sentence: a cluster-wide Kubernetes watcher that emits structured JSON
 records describing pods, images, and the ingress/gateway exposure graph, for

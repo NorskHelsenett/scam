@@ -1,4 +1,4 @@
-module github.com/jonasbg/spam-agent
+module github.com/NorskHelsenett/scam
 
 go 1.26.0
 

@@ -1,29 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: spam-agent
-  namespace: spam-agent
+  name: scam
+  namespace: scam
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: spam-agent
+      app: scam
   template:
     metadata:
       labels:
-        app: spam-agent
+        app: scam
     spec:
-      serviceAccountName: spam-agent
+      serviceAccountName: scam
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: spam-agent
-          image: git.torden.tech/jonasbg/spam-agent:latest
+        - name: scam
+          image: git.torden.tech/jonasbg/scam:latest
           imagePullPolicy: Always
           env:
             - name: CLUSTER_NAME

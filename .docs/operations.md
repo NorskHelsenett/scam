@@ -68,25 +68,25 @@ Useful greps:
 
 ```sh
 # Live tail of Container records only
-kubectl -n spam-agent logs -f deployment/spam-agent \
+kubectl -n scam logs -f deployment/scam \
   | jq -c 'select(.kind=="Container")'
 
 # Every FQDN the agent has seen
-kubectl -n spam-agent logs deployment/spam-agent \
+kubectl -n scam logs deployment/scam \
   | jq -r 'select(.kind=="Ingress") | .rules[].host,
            select(.kind=="HTTPRoute" or .kind=="GRPCRoute" or .kind=="TLSRoute") | .hostnames[],
            select(.kind=="IngressRoute" or .kind=="IngressRouteTCP") | .hosts[]' \
   | sort -u
 
 # Kind counts
-kubectl -n spam-agent logs --tail=5000 deployment/spam-agent \
+kubectl -n scam logs --tail=5000 deployment/scam \
   | jq -r 'select(.kind) | .kind' | sort | uniq -c | sort -rn
 ```
 
 ## Upgrading
 
 1. Build and push a new image.
-2. `kubectl -n spam-agent rollout restart deployment/spam-agent`.
+2. `kubectl -n scam rollout restart deployment/scam`.
 3. On restart the agent re-emits everything as `INITIAL`. `spam`'s
    ingest must dedup by UID — `spam.md` §2.
 
@@ -99,7 +99,7 @@ No migration dances; no CRDs owned by this agent; nothing stateful.
 | `load kube config … no in-cluster config and no kubeconfig given` | Running out-of-cluster without `-kubeconfig`. |
 | `cache sync aborted` | Context was cancelled (SIGTERM) before the first list+watch cycle completed. Happens on restart under load; retry. |
 | `CLUSTER_NAME is empty; …` | `CLUSTER_NAME` env is unset. Records will still flow but carry `cluster:""`. |
-| Forbidden on some kind | RBAC gap. `kubectl auth can-i watch <kind> --as=system:serviceaccount:spam-agent:spam-agent`. |
+| Forbidden on some kind | RBAC gap. `kubectl auth can-i watch <kind> --as=system:serviceaccount:scam:scam`. |
 | Gateway / Traefik records missing | CRDs aren't installed, or the discovery probe didn't see the group. Check `kubectl get crd`. |
 | Memory climbing | Shouldn't happen; informer caches are bounded by the Kubernetes object graph. If you see it, capture a `pprof` heap profile — there is no pprof endpoint currently; add one behind a flag if you need to debug. |
 
@@ -111,13 +111,13 @@ Devcontainer: `.devcontainer/devcontainer.json` pins
 Build inside the devcontainer:
 
 ```sh
-go build -buildvcs=false -o /tmp/spam-agent .
+go build -buildvcs=false -o /tmp/scam .
 go vet ./...
 ```
 
 Image build (amd64, even on arm64 hosts):
 
 ```sh
-podman build --platform linux/amd64 -t git.torden.tech/jonasbg/spam-agent:latest .
-podman push git.torden.tech/jonasbg/spam-agent:latest
+podman build --platform linux/amd64 -t git.torden.tech/jonasbg/scam:latest .
+podman push git.torden.tech/jonasbg/scam:latest
 ```

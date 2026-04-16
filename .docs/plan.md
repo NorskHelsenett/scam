@@ -1,6 +1,6 @@
 # Spam integration — plan & open decisions
 
-A decision log of the spam-agent → `NorskHelsenett/spam` rollout, written
+A decision log of the scam → `NorskHelsenett/spam` rollout, written
 for the people doing the work. Pair with:
 
 - [`records.md`](records.md) — the wire schema every record follows
@@ -66,9 +66,9 @@ Pending in the agent:
 ┌───────────────────────────────────────────────────────────────────┐
 │ inside a fresh cluster                                            │
 │                                                                   │
-│   umbrella Helm chart installs spam-agent                      │
+│   umbrella Helm chart installs scam                            │
 │   │                                                               │
-│   ServiceAccount "spam-agent"                                  │
+│   ServiceAccount "scam"                                        │
 │   │ projected token volume with audience: spam.nhn.no             │
 │   │ (kubelet rotates every hour, no human touches it)             │
 │   ▼                                                               │
@@ -136,7 +136,7 @@ You asked directly: *what do we do about someone hijacking the endpoint?*
    registration as `foo-prod` requires matching `(iss, sub)` on file.
    Collision → rejected + alert.
 5. **Mismatch sanity checks.** Auto-reject if `sub` is not
-   `system:serviceaccount:spam-agent:spam-agent` (i.e., not our
+   `system:serviceaccount:scam:scam` (i.e., not our
    agent's SA), or `aud` is not the expected `spam.nhn.no`. A malicious
    actor deploying their own agent with their own SA gets auto-rejected
    at the claims level.
@@ -305,7 +305,7 @@ Later (not this rollout):
 - Agent is done and running. Stream is clean: ADD / UPDATE / DELETE,
   every record UID-keyed, pod phase tracked for "running NOW" queries,
   image ground-truth preserved in `image_spec` + `image_id`. Renamed
-  from spam-operator to spam-agent — it's a collector, not a controller.
+  from spam-operator to scam (SPAM Cluster Agent Metadata) — it's a collector, not a controller.
 - Auth model: projected SA JWT as identity hint, admin approval gate,
   per-cluster token post-approval. Layered mitigations for endpoint hijack
   acknowledge that first-contact can't be cryptographically bulletproof

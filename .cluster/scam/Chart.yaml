@@ -1,0 +1,6 @@
+apiVersion: v2
+name: scam
+description: SPAM Cluster Agent Metadata — Kubernetes metadata collector
+type: application
+version: 0.1.0
+appVersion: 0.1.0

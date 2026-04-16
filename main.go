@@ -1,4 +1,4 @@
-// spam-agent watches cluster metadata (Pods + their container images and
+// scam (SPAM Cluster Agent Metadata) watches cluster metadata (Pods + their container images and
 // the exposure chain: Service, Ingress, IngressClass, EndpointSlice, and
 // Gateway API resources when installed) and emits per-object JSON records
 // on stdout for later ingest.

@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: git.torden.tech
-  REGISTRY_PATH: jonasbg/spam-agent
+  REGISTRY_PATH: jonasbg/scam
 
 jobs:
   build:
@@ -97,8 +97,8 @@ jobs:
           TAG_SUFFIX: ${{ steps.helm-repo.outputs.tag_suffix }}
           HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
         run: |
-          CHART_DIR=".cluster/spam-agent"
-          CHART_NAME="spam-agent"
+          CHART_DIR=".cluster/scam"
+          CHART_NAME="scam"
 
           # Pull current chart to get version
           helm pull oci://${{ env.REGISTRY }}/${HELM_REPO}/${CHART_NAME} || echo "No existing chart found"
