@@ -18,6 +18,7 @@ import (
 	"github.com/NorskHelsenett/scam/internal/collector"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -144,6 +145,13 @@ func main() {
 		collector.EmitServiceDelete,
 	)
 
+	esInf := factory.Discovery().V1().EndpointSlices()
+	_ = esInf.Informer().SetTransform(collector.TrimEndpointSlice)
+	collector.OnEvents(esInf.Informer(), &synced,
+		func(event string, es, _ *discoveryv1.EndpointSlice) { collector.EmitEndpointSlice(event, es) },
+		collector.EmitEndpointSliceDelete,
+	)
+
 	ingInf := factory.Networking().V1().Ingresses()
 	_ = ingInf.Informer().SetTransform(collector.TrimIngress)
 	_ = ingInf.Informer().AddIndexers(cache.Indexers{collector.BackendIndexName: collector.IngressBackendKeys})
@@ -230,6 +238,7 @@ func main() {
 		podInf.Informer().HasSynced,
 		rsInf.Informer().HasSynced,
 		svcInf.Informer().HasSynced,
+		esInf.Informer().HasSynced,
 		ingInf.Informer().HasSynced,
 		icInf.Informer().HasSynced,
 	}
@@ -255,6 +264,7 @@ func main() {
 	collector.DumpIngresses(ingInf)
 	collector.DumpIngressClasses(icInf)
 	collector.DumpServices(svcInf)
+	collector.DumpEndpointSlices(esInf)
 
 	synced.Store(true)
 	collector.Log.Info("streaming events")

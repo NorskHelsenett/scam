@@ -3,6 +3,7 @@ package collector
 import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -91,6 +92,19 @@ func TrimReplicaSet(obj any) (any, error) {
 	rs.Spec = appsv1.ReplicaSetSpec{}
 	rs.Status = appsv1.ReplicaSetStatus{}
 	return rs, nil
+}
+
+// TrimEndpointSlice strips annotations/managedFields. We keep endpoints,
+// ports, labels (for service_name linkage), and addressType.
+func TrimEndpointSlice(obj any) (any, error) {
+	es, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return obj, nil
+	}
+	es.Annotations = nil
+	es.ManagedFields = nil
+	es.Finalizers = nil
+	return es, nil
 }
 
 // TrimMeta is a generic small transform for objects where we only read
