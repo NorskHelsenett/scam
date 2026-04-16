@@ -22,8 +22,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -57,6 +59,8 @@ func main() {
 	if cluster == "" {
 		log.Warn("CLUSTER_NAME is empty; emitted records will carry cluster=\"\"")
 	}
+
+	printBanner()
 
 	cfg, err := loadConfig(kubeconfig)
 	if err != nil {
@@ -224,6 +228,41 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutdown")
+}
+
+func printBanner() {
+	clusterID := os.Getenv("CLUSTER_ID")
+	environment := os.Getenv("ENVIRONMENT")
+	callcenter := os.Getenv("CALLCENTER")
+
+	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
+	lines := []string{
+		fmt.Sprintf("cluster:     %s", cluster),
+		fmt.Sprintf("cluster_id:  %s", clusterID),
+		fmt.Sprintf("environment: %s", environment),
+		fmt.Sprintf("callcenter:  %s", callcenter),
+	}
+
+	maxW := utf8.RuneCountInString(title)
+	for _, l := range lines {
+		if w := utf8.RuneCountInString(l); w > maxW {
+			maxW = w
+		}
+	}
+
+	hr := strings.Repeat("\u2500", maxW+2)
+	pad := func(s string) string {
+		return s + strings.Repeat(" ", maxW-utf8.RuneCountInString(s))
+	}
+
+	fmt.Fprintf(os.Stderr, "\u250c%s\u2510\n", hr)
+	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(title))
+	fmt.Fprintf(os.Stderr, "\u251c%s\u2524\n", hr)
+	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(""))
+	for _, l := range lines {
+		fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(l))
+	}
+	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
 }
 
 // loadConfig tries in-cluster first, then falls back to kubeconfig.
