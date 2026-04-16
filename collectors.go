@@ -197,7 +197,6 @@ func emitPod(event string, p, oldP *corev1.Pod) int {
 		// is wrong for some weird ref, consumers can fall back to these.
 		log.Info(event,
 			"kind", "Container",
-			"cluster", cluster,
 			"namespace", p.Namespace,
 			"pod_uid", string(p.UID),
 			"pod_phase", string(p.Status.Phase),
@@ -240,7 +239,6 @@ func emitPodDelete(p *corev1.Pod) {
 func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname string) {
 	log.Info("DELETE",
 		"kind", "Container",
-		"cluster", cluster,
 		"namespace", ns,
 		"pod_uid", podUID,
 		"owner_kind", ownerKind,
@@ -256,7 +254,6 @@ func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname
 func emitServiceDelete(s *corev1.Service) {
 	log.Info("DELETE",
 		"kind", "Service",
-		"cluster", cluster,
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,
@@ -315,7 +312,6 @@ func emitServiceRaw(event string, s *corev1.Service) {
 	lbIPs, lbHosts := lbAddresses(s.Status.LoadBalancer.Ingress)
 	log.Info(event,
 		"kind", "Service",
-		"cluster", cluster,
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,
@@ -371,7 +367,6 @@ func derefStr(p *string) string {
 func emitIngressDelete(i *networkingv1.Ingress) {
 	log.Info("DELETE",
 		"kind", "Ingress",
-		"cluster", cluster,
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -445,7 +440,6 @@ func emitIngress(event string, i *networkingv1.Ingress) {
 	lbIPs, lbHosts := ingressLbAddresses(i.Status.LoadBalancer.Ingress)
 	log.Info(event,
 		"kind", "Ingress",
-		"cluster", cluster,
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -463,7 +457,6 @@ func emitIngress(event string, i *networkingv1.Ingress) {
 func emitIngressClassDelete(ic *networkingv1.IngressClass) {
 	log.Info("DELETE",
 		"kind", "IngressClass",
-		"cluster", cluster,
 		"uid", string(ic.UID),
 		"name", ic.Name,
 	)
@@ -483,7 +476,6 @@ func dumpIngressClasses(inf netinformers.IngressClassInformer) {
 func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 	log.Info(event,
 		"kind", "IngressClass",
-		"cluster", cluster,
 		"uid", string(ic.UID),
 		"name", ic.Name,
 		"labels", ic.Labels,

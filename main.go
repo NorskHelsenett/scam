@@ -22,11 +22,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
-	"unicode/utf8"
 
+	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,10 +40,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
-var (
-	log     = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	cluster string // from CLUSTER_NAME env var; stamped on every emitted record
-)
+var log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 func main() {
 	var kubeconfig string
@@ -54,13 +50,6 @@ func main() {
 	}
 	flag.StringVar(&kubeconfig, "kubeconfig", defaultKC, "path to kubeconfig (ignored in-cluster)")
 	flag.Parse()
-
-	cluster = os.Getenv("CLUSTER_NAME")
-	if cluster == "" {
-		log.Warn("CLUSTER_NAME is empty; emitted records will carry cluster=\"\"")
-	}
-
-	printBanner()
 
 	cfg, err := loadConfig(kubeconfig)
 	if err != nil {
@@ -75,6 +64,25 @@ func main() {
 		log.Error("build clientset", "err", err)
 		os.Exit(1)
 	}
+
+	// ---- cluster identity (auto-detected from node metadata) ---------------
+	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
+	clusterName := ci.GetClusterName()
+	if env := os.Getenv("CLUSTER_NAME"); env != "" {
+		clusterName = env // explicit override wins
+	}
+	log = log.With(
+		"cluster", clusterName,
+		"cluster_id", ci.GetClusterId(),
+		"provider", ci.GetProvider().String(),
+		"kubernetes_provider", ci.GetKubernetesProvider().String(),
+		"machine_provider", ci.GetMachineProvider().String(),
+		"region", ci.GetRegion(),
+		"datacenter", ci.GetDatacenter(),
+		"workspace", ci.GetClusterWorkspace(),
+		"environment", ci.GetEnvironment(),
+		"country", ci.GetCountry(),
+	)
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error("build dynamic client", "err", err)
@@ -228,41 +236,6 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutdown")
-}
-
-func printBanner() {
-	clusterID := os.Getenv("CLUSTER_ID")
-	environment := os.Getenv("ENVIRONMENT")
-	callcenter := os.Getenv("CALLCENTER")
-
-	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
-	lines := []string{
-		fmt.Sprintf("cluster:     %s", cluster),
-		fmt.Sprintf("cluster_id:  %s", clusterID),
-		fmt.Sprintf("environment: %s", environment),
-		fmt.Sprintf("callcenter:  %s", callcenter),
-	}
-
-	maxW := utf8.RuneCountInString(title)
-	for _, l := range lines {
-		if w := utf8.RuneCountInString(l); w > maxW {
-			maxW = w
-		}
-	}
-
-	hr := strings.Repeat("\u2500", maxW+2)
-	pad := func(s string) string {
-		return s + strings.Repeat(" ", maxW-utf8.RuneCountInString(s))
-	}
-
-	fmt.Fprintf(os.Stderr, "\u250c%s\u2510\n", hr)
-	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(title))
-	fmt.Fprintf(os.Stderr, "\u251c%s\u2524\n", hr)
-	fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(""))
-	for _, l := range lines {
-		fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(l))
-	}
-	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
 }
 
 // loadConfig tries in-cluster first, then falls back to kubeconfig.

@@ -15,7 +15,7 @@ metadata:
   name: scam
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services"]
+    resources: ["nodes", "pods", "services"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]

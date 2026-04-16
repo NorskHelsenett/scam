@@ -29,8 +29,6 @@ spec:
           image: ghcr.io/norskhelsenett/scam:latest
           imagePullPolicy: Always
           env:
-            - name: CLUSTER_NAME
-              value: "talos-proxmox-cluster"
             - name: GOGC
               value: "50"
             - name: GOMEMLIMIT
