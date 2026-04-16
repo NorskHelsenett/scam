@@ -58,7 +58,8 @@ func main() {
 	flag.Parse()
 
 	// If CALLCENTER_URL is set, tee slog output to a buffer for periodic push.
-	if callcenterURL := strings.TrimSpace(os.Getenv("CALLCENTER_URL")); callcenterURL != "" {
+	callcenterURL := strings.TrimSpace(os.Getenv("CALLCENTER_URL"))
+	if callcenterURL != "" {
 		capture = &lineCapture{stdout: os.Stdout}
 		log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
@@ -112,6 +113,17 @@ func main() {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
 	log = log.With(clusterAttrs...)
+
+	// ---- startup banner ----------------------------------------------------
+	fmt.Fprintln(os.Stderr, "┌─────────────────────────────────────────────")
+	fmt.Fprintln(os.Stderr, "│ SCAM — SPAM Cluster Agent Metadata")
+	fmt.Fprintln(os.Stderr, "├─────────────────────────────────────────────")
+	fmt.Fprintf(os.Stderr, "│  cluster:     %s\n", clusterName)
+	fmt.Fprintf(os.Stderr, "│  cluster_id:  %s\n", clusterID)
+	fmt.Fprintf(os.Stderr, "│  environment: %s\n", environment)
+	fmt.Fprintf(os.Stderr, "│  callcenter:  %s\n", callcenterURL)
+	fmt.Fprintln(os.Stderr, "└─────────────────────────────────────────────")
+
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error("build dynamic client", "err", err)
@@ -127,8 +139,7 @@ func main() {
 	defer stop()
 
 	if capture != nil {
-		endpoint := strings.TrimSpace(os.Getenv("CALLCENTER_URL"))
-		log.Info("push enabled", "endpoint", endpoint)
+		endpoint := strings.TrimRight(callcenterURL, "/") + "/api/scam/callcenter"
 		go pushLoop(ctx, endpoint, capture)
 	}
 
