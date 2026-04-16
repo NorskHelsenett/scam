@@ -7,6 +7,7 @@ image:
 
 clusterName: ""
 environment: ""
+callcenter: "https://spam.sikkerhet.nhn.no/api/scam/callcenter"
 
 resources:
   requests:

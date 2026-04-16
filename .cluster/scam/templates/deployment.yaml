@@ -43,6 +43,10 @@ spec:
             - name: ENVIRONMENT
               value: {{ .Values.environment | quote }}
             {{- end }}
+            {{- if .Values.callcenter }}
+            - name: CALLCENTER_URL
+              value: {{ .Values.callcenter | quote }}
+            {{- end }}
             - name: GOGC
               value: "50"
             - name: GOMEMLIMIT

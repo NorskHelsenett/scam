@@ -18,10 +18,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -41,7 +43,10 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
-var log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+var (
+	log     = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	capture *lineCapture // non-nil when SPAM_URL is set
+)
 
 func main() {
 	var kubeconfig string
@@ -51,6 +56,12 @@ func main() {
 	}
 	flag.StringVar(&kubeconfig, "kubeconfig", defaultKC, "path to kubeconfig (ignored in-cluster)")
 	flag.Parse()
+
+	// If CALLCENTER_URL is set, tee slog output to a buffer for periodic push.
+	if callcenterURL := strings.TrimSpace(os.Getenv("CALLCENTER_URL")); callcenterURL != "" {
+		capture = &lineCapture{stdout: os.Stdout}
+		log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
 
 	cfg, err := loadConfig(kubeconfig)
 	if err != nil {
@@ -114,6 +125,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if capture != nil {
+		endpoint := strings.TrimSpace(os.Getenv("CALLCENTER_URL"))
+		log.Info("push enabled", "endpoint", endpoint)
+		go pushLoop(ctx, endpoint, capture)
+	}
 
 	var synced atomic.Bool
 
