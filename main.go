@@ -28,6 +28,7 @@ import (
 	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -71,9 +72,17 @@ func main() {
 	if env := os.Getenv("CLUSTER_NAME"); env != "" {
 		clusterName = env // explicit override wins
 	}
+	clusterID := ci.GetClusterId()
+	if clusterID == "" || clusterID == "unknown-undefined" || clusterID == "unknown-cluster-id" {
+		// Fallback: the kube-system namespace UID is unique per cluster and
+		// stable for its lifetime.
+		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
+			clusterID = string(ns.UID)
+		}
+	}
 	log = log.With(
 		"cluster", clusterName,
-		"cluster_id", ci.GetClusterId(),
+		"cluster_id", clusterID,
 		"provider", ci.GetProvider().String(),
 		"kubernetes_provider", ci.GetKubernetesProvider().String(),
 		"machine_provider", ci.GetMachineProvider().String(),
