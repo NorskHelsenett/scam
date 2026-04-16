@@ -680,6 +680,10 @@ func splitImage(spec, imageID string) (repo, tag, digest string) {
 					repo = cand
 				}
 			}
+		} else if strings.HasPrefix(id, "sha256:") {
+			// Bare digest without repo prefix (e.g. "sha256:82bca8fc...")
+			// reported by some runtimes (Tanzu/containerd).
+			digest = id
 		}
 	}
 	return

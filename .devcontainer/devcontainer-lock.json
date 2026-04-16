@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/navinkrishnan/devcontainer-features-btp/helm:1": {
+      "version": "1.0.2",
+      "resolved": "ghcr.io/navinkrishnan/devcontainer-features-btp/helm@sha256:3786e99ccdd00e6f18b4c23bbbaef190a94fed57e9ba8235465604ffcf45190b",
+      "integrity": "sha256:3786e99ccdd00e6f18b4c23bbbaef190a94fed57e9ba8235465604ffcf45190b"
+    }
+  }
+}

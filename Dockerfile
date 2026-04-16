@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build a tiny static binary on scratch. GOGC=50 inside the runtime keeps
 # the live heap small in exchange for a little extra CPU on GC.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:27f829349da645e287cb195a9921c106fc224eeebbdc33aeb0f4fca2382befa6 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
