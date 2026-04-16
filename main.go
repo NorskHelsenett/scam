@@ -67,31 +67,40 @@ func main() {
 	}
 
 	// ---- cluster identity (auto-detected from node metadata) ---------------
+	//
+	// The interregator inspects node labels to infer provider, cluster name,
+	// etc. Env vars override when set so operators can pin values without
+	// depending on the detection logic.
 	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
-	clusterName := ci.GetClusterName()
-	if env := os.Getenv("CLUSTER_NAME"); env != "" {
-		clusterName = env // explicit override wins
-	}
+
 	clusterID := ci.GetClusterId()
 	if clusterID == "" || clusterID == "unknown-undefined" || clusterID == "unknown-cluster-id" {
-		// Fallback: the kube-system namespace UID is unique per cluster and
-		// stable for its lifetime.
 		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
 			clusterID = string(ns.UID)
 		}
 	}
-	log = log.With(
-		"cluster", clusterName,
-		"cluster_id", clusterID,
-		"provider", ci.GetProvider().String(),
-		"kubernetes_provider", ci.GetKubernetesProvider().String(),
-		"machine_provider", ci.GetMachineProvider().String(),
-		"region", ci.GetRegion(),
-		"datacenter", ci.GetDatacenter(),
-		"workspace", ci.GetClusterWorkspace(),
-		"environment", ci.GetEnvironment(),
-		"country", ci.GetCountry(),
-	)
+
+	clusterName := ci.GetClusterName()
+	if clusterName == "" || clusterName == "unknown-undefined" {
+		clusterName = os.Getenv("CLUSTER_NAME")
+	}
+
+	environment := ci.GetEnvironment()
+	if environment == "" || environment == "unknown-undefined" {
+		environment = os.Getenv("ENVIRONMENT")
+	}
+
+	var clusterAttrs []any
+	if clusterName != "" {
+		clusterAttrs = append(clusterAttrs, "cluster", clusterName)
+	}
+	if clusterID != "" {
+		clusterAttrs = append(clusterAttrs, "cluster_id", clusterID)
+	}
+	if environment != "" {
+		clusterAttrs = append(clusterAttrs, "environment", environment)
+	}
+	log = log.With(clusterAttrs...)
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error("build dynamic client", "err", err)

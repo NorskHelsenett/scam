@@ -6,6 +6,7 @@ image:
   pullPolicy: Always
 
 clusterName: ""
+environment: ""
 
 resources:
   requests:

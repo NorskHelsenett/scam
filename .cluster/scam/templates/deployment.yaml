@@ -39,6 +39,10 @@ spec:
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
             {{- end }}
+            {{- if .Values.environment }}
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            {{- end }}
             - name: GOGC
               value: "50"
             - name: GOMEMLIMIT
