@@ -40,6 +40,7 @@ jobs:
             TAGS="${IMAGE}:dev"
           fi
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "cache=${IMAGE}:buildcache" >> $GITHUB_OUTPUT
 
       - name: Build and push image
         id: build
@@ -57,8 +58,8 @@ jobs:
             build.repository.name=${{ github.event.repository.name }}
             build.repository.branch=${{ github.ref_name }}
             build.repository.commithash=${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ steps.tags.outputs.cache }}
+          cache-to: type=registry,ref=${{ steps.tags.outputs.cache }},mode=max
 
   helm-push:
     runs-on: ubuntu-latest
