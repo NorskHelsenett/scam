@@ -32,11 +32,10 @@ func DumpServices(inf coreinformers.ServiceInformer) {
 		})
 }
 
-// EmitService applies the "drop cluster-internal ClusterIPs" filter.
+// EmitService emits a Service record. All services are included so the
+// consuming system can draw the full service → pod chain, not just
+// ingress-exposed ones.
 func EmitService(event string, s *corev1.Service) bool {
-	if s.Spec.Type == corev1.ServiceTypeClusterIP && !ServiceReferenced(s.Namespace, s.Name) {
-		return false
-	}
 	emitServiceRaw(event, s)
 	return true
 }
