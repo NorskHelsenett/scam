@@ -4,17 +4,24 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	PushInterval   = 30 * time.Second
-	maxBackoff     = 5 * time.Minute
-	maxBufferSize  = 10_000
-	pushBatchLimit = 2_000
+	PushInterval             = 30 * time.Second
+	defaultHeartbeatInterval = 5 * time.Minute
+	maxHeartbeatBackoff      = 15 * time.Minute
+	heartbeatTimeout         = 3 * time.Second
+	heartbeatReminderAfter   = 1 * time.Hour
+	maxBackoff               = 5 * time.Minute
+	maxBufferSize            = 10_000
+	pushBatchLimit           = 2_000
 )
 
 // LineCapture is an io.Writer that always writes to stdout and additionally
@@ -126,6 +133,141 @@ func push(client *http.Client, endpoint string, records []json.RawMessage) bool 
 		return false
 	}
 	return true
+}
+
+// resolveHeartbeatInterval reads HEARTBEAT_INTERVAL (Go duration) and
+// falls back to the default. Invalid values are logged and the default
+// used so a typo doesn't silently disable heartbeats.
+func resolveHeartbeatInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("HEARTBEAT_INTERVAL"))
+	if raw == "" {
+		return defaultHeartbeatInterval
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		Log.Warn("heartbeat: invalid HEARTBEAT_INTERVAL, using default",
+			"value", raw, "default", defaultHeartbeatInterval)
+		return defaultHeartbeatInterval
+	}
+	return d
+}
+
+// HeartbeatLoop posts a liveness ping to SPAM periodically so the
+// server's live-state filter keeps the cluster visible even when
+// there's no resource churn to push.
+//
+// Design for large fleets:
+//
+//  1. Fire-and-forget with a short (heartbeatTimeout) request timeout —
+//     a slow SPAM won't wedge the goroutine.
+//  2. Exponential backoff on sustained failures (e.g. firewall closed)
+//     caps at maxHeartbeatBackoff so we don't hammer the endpoint while
+//     it's unreachable.
+//  3. Logging is deliberately sparse: the first failure logs ERROR
+//     (catches misconfiguration on first deploy), subsequent failures
+//     in the same outage are silent, and every heartbeatReminderAfter
+//     of continuous failure a fresh ERROR fires so alerting picks it
+//     up. Recovery logs INFO exactly once.
+//  4. Single Timer (not a Ticker) so variable intervals are clean;
+//     body + http.Client reused across the loop.
+//
+// Failures never affect anything outside this goroutine — the cluster
+// the agent is running in is unaffected by an unreachable SPAM.
+func HeartbeatLoop(ctx context.Context, endpoint, clusterID string) {
+	if clusterID == "" {
+		Log.Warn("heartbeat: cluster_id empty, skipping loop")
+		return
+	}
+	body, err := json.Marshal(map[string]string{"cluster_id": clusterID})
+	if err != nil {
+		Log.Error("heartbeat: marshal", "err", err)
+		return
+	}
+	client := &http.Client{Timeout: heartbeatTimeout}
+	interval := resolveHeartbeatInterval()
+
+	var (
+		consecutiveFailures int
+		lastErrorLog        time.Time
+		firstTick           = true
+	)
+
+	// First heartbeat fires immediately so liveness is established at
+	// startup rather than after a full interval.
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		if err := sendHeartbeat(ctx, client, endpoint, body); err != nil {
+			consecutiveFailures++
+			// First failure always logs (catches firewall/DNS issues on
+			// first deploy); subsequent failures log only every hour so
+			// a long outage stays visible without flooding.
+			if consecutiveFailures == 1 || time.Since(lastErrorLog) >= heartbeatReminderAfter {
+				Log.Error("heartbeat: unable to contact callcenter",
+					"endpoint", endpoint,
+					"err", err,
+					"consecutive_failures", consecutiveFailures)
+				lastErrorLog = time.Now()
+			}
+			timer.Reset(nextHeartbeatBackoff(interval, consecutiveFailures))
+			firstTick = false
+			continue
+		}
+
+		if consecutiveFailures > 0 {
+			Log.Info("heartbeat: restored",
+				"endpoint", endpoint,
+				"after_failures", consecutiveFailures)
+			consecutiveFailures = 0
+			lastErrorLog = time.Time{}
+		} else if firstTick {
+			// One INFO on first successful ping so operators can see
+			// liveness got through on startup.
+			Log.Info("heartbeat: ok", "endpoint", endpoint, "interval", interval)
+			firstTick = false
+		}
+		timer.Reset(interval)
+	}
+}
+
+// sendHeartbeat returns an error for transport failures or non-2xx
+// responses. The request is cancelable via ctx so shutdown isn't
+// blocked by the request timeout.
+func sendHeartbeat(ctx context.Context, client *http.Client, endpoint string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// nextHeartbeatBackoff doubles the interval for each consecutive
+// failure, capped at maxHeartbeatBackoff.
+func nextHeartbeatBackoff(base time.Duration, consecutiveFailures int) time.Duration {
+	d := base
+	for i := 1; i < consecutiveFailures; i++ {
+		d *= 2
+		if d >= maxHeartbeatBackoff {
+			return maxHeartbeatBackoff
+		}
+	}
+	return d
 }
 
 func NextBackoff(current time.Duration) time.Duration {

@@ -116,8 +116,13 @@ func main() {
 		capture := &collector.LineCapture{Stdout: os.Stdout}
 		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
 		collector.Log = collector.Log.With(clusterAttrs...)
-		endpoint := strings.TrimRight(callcenterURL, "/") + "/api/scam/callcenter"
-		go collector.PushLoop(ctx, endpoint, capture)
+		base := strings.TrimRight(callcenterURL, "/")
+		go collector.PushLoop(ctx, base+"/api/scam/callcenter", capture)
+		// Keep the server's session alive on quiet clusters — without
+		// heartbeats, last_push_at only advances when we have actual
+		// events to push, so a stable cluster falls out of the live
+		// window and disappears from the UI.
+		go collector.HeartbeatLoop(ctx, base+"/api/scam/heartbeat", clusterID)
 	}
 
 	var synced atomic.Bool
