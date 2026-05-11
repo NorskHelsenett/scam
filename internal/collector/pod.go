@@ -14,19 +14,11 @@ import (
 
 const defaultSnapshotInterval = 6 * time.Hour
 
-// DumpPods emits the initial sorted snapshot for all pods.
-func DumpPods(inf coreinformers.PodInformer) {
-	pods, err := inf.Lister().List(labels.Everything())
-	if err != nil {
-		Log.Error("list pods", "err", err)
-		return
-	}
-	DumpSorted("Pod", pods, lessPod, func(p *corev1.Pod) int { return EmitPod("INITIAL", p, nil) })
-}
-
 // SnapshotLoop periodically emits a full pod/container snapshot and a compact
 // authoritative key list. SPAM uses the key list to tombstone Container rows
 // that were missed because an informer DELETE/update event or push was lost.
+// The initial snapshot fires inline from main() right after cache sync;
+// this loop only handles the periodic re-emit.
 func SnapshotLoop(ctx context.Context, podInf coreinformers.PodInformer) {
 	interval := resolveSnapshotInterval()
 	if interval <= 0 {

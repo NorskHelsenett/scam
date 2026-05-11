@@ -259,7 +259,7 @@ func main() {
 	}
 
 	// ---- initial sorted snapshot per kind ------------------------------
-	collector.DumpPods(podInf)
+	collector.EmitContainerSnapshot(podInf)
 	for _, gvr := range gwGVRs {
 		collector.DumpGatewayAPI(gvr, gwInformers[gvr.String()])
 	}
