@@ -60,6 +60,7 @@ func EmitIngress(event string, i *networkingv1.Ingress) {
 	lbIPs, lbHosts := IngressLbAddresses(i.Status.LoadBalancer.Ingress)
 	Log.Info(event,
 		"kind", "Ingress",
+		"event_id", NextEventID(),
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -75,6 +76,7 @@ func EmitIngress(event string, i *networkingv1.Ingress) {
 func EmitIngressDelete(i *networkingv1.Ingress) {
 	Log.Info("DELETE",
 		"kind", "Ingress",
+		"event_id", NextEventID(),
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -86,6 +88,7 @@ func EmitIngressDelete(i *networkingv1.Ingress) {
 func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 	Log.Info(event,
 		"kind", "IngressClass",
+		"event_id", NextEventID(),
 		"uid", string(ic.UID),
 		"name", ic.Name,
 		"labels", ic.Labels,
@@ -100,6 +103,7 @@ func EmitIngressClass(event string, ic *networkingv1.IngressClass) {
 func EmitIngressClassDelete(ic *networkingv1.IngressClass) {
 	Log.Info("DELETE",
 		"kind", "IngressClass",
+		"event_id", NextEventID(),
 		"uid", string(ic.UID),
 		"name", ic.Name,
 	)

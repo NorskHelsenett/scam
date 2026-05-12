@@ -56,6 +56,7 @@ func EmitEndpointSlice(event string, es *discoveryv1.EndpointSlice) {
 
 	Log.Info(event,
 		"kind", "EndpointSlice",
+		"event_id", NextEventID(),
 		"uid", string(es.UID),
 		"namespace", es.Namespace,
 		"name", es.Name,
@@ -70,6 +71,7 @@ func EmitEndpointSlice(event string, es *discoveryv1.EndpointSlice) {
 func EmitEndpointSliceDelete(es *discoveryv1.EndpointSlice) {
 	Log.Info("DELETE",
 		"kind", "EndpointSlice",
+		"event_id", NextEventID(),
 		"uid", string(es.UID),
 		"namespace", es.Namespace,
 		"name", es.Name,

@@ -182,6 +182,7 @@ func EmitPod(event string, p, oldP *corev1.Pod) int {
 		image, registry := SplitImageName(fullRepo)
 		Log.Info(event,
 			"kind", "Container",
+			"event_id", NextEventID(),
 			"namespace", p.Namespace,
 			"pod_uid", string(p.UID),
 			"pod_phase", string(p.Status.Phase),
@@ -221,6 +222,7 @@ func EmitPodDelete(p *corev1.Pod) {
 func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname string) {
 	Log.Info("DELETE",
 		"kind", "Container",
+		"event_id", NextEventID(),
 		"namespace", ns,
 		"pod_uid", podUID,
 		"owner_kind", ownerKind,

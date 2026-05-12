@@ -74,6 +74,7 @@ func EmitFullSnapshot(rs SnapshotResources, snapshotType string) {
 	id := newSnapshotID()
 	Log.Info("SNAPSHOT_BEGIN",
 		"kind", "Snapshot",
+		"event_id", NextEventID(),
 		"snapshot_id", id,
 		"snapshot_type", snapshotType,
 	)
@@ -100,6 +101,7 @@ func EmitFullSnapshot(rs SnapshotResources, snapshotType string) {
 	}
 	Log.Info("SNAPSHOT_END",
 		"kind", "Snapshot",
+		"event_id", NextEventID(),
 		"snapshot_id", id,
 	)
 }
@@ -253,6 +255,7 @@ func EmitTraefikSnapshot(gvr schema.GroupVersionResource, inf cache.SharedIndexI
 func emitSnapshotKeys(snapshotID, targetKind string, keys []string) {
 	Log.Info("SNAPSHOT",
 		"kind", "Snapshot",
+		"event_id", NextEventID(),
 		"snapshot_id", snapshotID,
 		"target_kind", targetKind,
 		"resource_keys", keys,

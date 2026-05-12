@@ -22,6 +22,10 @@ const (
 	maxBackoff               = 5 * time.Minute
 	maxBufferSize            = 10_000
 	pushBatchLimit           = 2_000
+	// snapshotCooldown caps how often an ACK-mismatch triggers a
+	// reconcile snapshot. Without it, a persistent SPAM-side gap
+	// (e.g. broken persistence) would fire a snapshot every push tick.
+	snapshotCooldown = 5 * time.Minute
 )
 
 // LineCapture is an io.Writer that always writes to stdout and additionally
@@ -65,18 +69,36 @@ func (lc *LineCapture) Rebuffer(records []json.RawMessage) {
 	lc.mu.Unlock()
 }
 
-// PushLoop periodically flushes captured records to the SPAM callcenter endpoint.
-func PushLoop(ctx context.Context, endpoint string, cap *LineCapture) {
+// pushAck is the SPAM response body. last_seen_event_id is the highest
+// event_id SPAM has persisted for this cluster; the push loop compares
+// it against the local "highest pushed" and triggers a reconcile
+// snapshot on mismatch. SPAM that hasn't implemented the contract
+// returns nothing — last_seen_event_id is then 0 and we skip the
+// comparison entirely until SPAM speaks the protocol.
+type pushAck struct {
+	LastSeenEventID uint64 `json:"last_seen_event_id"`
+}
+
+// PushLoop periodically flushes captured records to the SPAM callcenter
+// endpoint, advances the local "last pushed" event_id after each
+// success, and fires triggerSnapshot when SPAM's reported last_seen
+// drifts from our last_pushed (with snapshotCooldown to avoid loops).
+// triggerSnapshot may be nil; when it is, the ACK path is disabled.
+func PushLoop(ctx context.Context, endpoint string, cap *LineCapture, triggerSnapshot func()) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	ticker := time.NewTicker(PushInterval)
 	defer ticker.Stop()
 
-	backoff := time.Duration(0)
+	var (
+		backoff           time.Duration
+		lastPushedEventID uint64
+		lastSnapshotAt    time.Time
+	)
 
 	for {
 		select {
 		case <-ctx.Done():
-			push(client, endpoint, cap.Flush())
+			_, _ = pushAll(client, endpoint, cap.Flush())
 			return
 		case <-ticker.C:
 			if backoff > 0 {
@@ -90,49 +112,91 @@ func PushLoop(ctx context.Context, endpoint string, cap *LineCapture) {
 			if len(records) == 0 {
 				continue
 			}
-			if !pushAll(client, endpoint, records) {
+			batchHigh := scanMaxEventID(records)
+			lastSeen, ok := pushAll(client, endpoint, records)
+			if !ok {
 				cap.Rebuffer(records)
 				backoff = NextBackoff(backoff)
 				Log.Warn("push failed, backing off", "retry_in", backoff, "endpoint", endpoint)
+				continue
+			}
+			if batchHigh > lastPushedEventID {
+				lastPushedEventID = batchHigh
+			}
+			if triggerSnapshot != nil && lastSeen != 0 &&
+				lastSeen != lastPushedEventID &&
+				time.Since(lastSnapshotAt) >= snapshotCooldown {
+				Log.Info("snapshot: ACK mismatch, firing reconcile",
+					"last_pushed", lastPushedEventID,
+					"spam_last_seen", lastSeen)
+				triggerSnapshot()
+				lastSnapshotAt = time.Now()
 			}
 		}
 	}
 }
 
-func pushAll(client *http.Client, endpoint string, records []json.RawMessage) bool {
+// scanMaxEventID returns the highest event_id field across records.
+// Records without event_id (e.g. operational logs) contribute 0 and
+// don't perturb the comparison; SPAM ignores them on its side too.
+func scanMaxEventID(records []json.RawMessage) uint64 {
+	type extract struct {
+		EventID uint64 `json:"event_id"`
+	}
+	var maxID uint64
+	for _, r := range records {
+		var e extract
+		if err := json.Unmarshal(r, &e); err != nil {
+			continue
+		}
+		if e.EventID > maxID {
+			maxID = e.EventID
+		}
+	}
+	return maxID
+}
+
+func pushAll(client *http.Client, endpoint string, records []json.RawMessage) (uint64, bool) {
+	var lastSeen uint64
 	for len(records) > 0 {
 		batch := records
 		if len(batch) > pushBatchLimit {
 			batch = records[:pushBatchLimit]
 		}
 		records = records[len(batch):]
-		if !push(client, endpoint, batch) {
-			return false
+		seen, ok := push(client, endpoint, batch)
+		if !ok {
+			return lastSeen, false
+		}
+		if seen > lastSeen {
+			lastSeen = seen
 		}
 	}
-	return true
+	return lastSeen, true
 }
 
-func push(client *http.Client, endpoint string, records []json.RawMessage) bool {
+func push(client *http.Client, endpoint string, records []json.RawMessage) (uint64, bool) {
 	if len(records) == 0 {
-		return true
+		return 0, true
 	}
 	body, err := json.Marshal(records)
 	if err != nil {
 		Log.Error("push: marshal", "err", err)
-		return false
+		return 0, false
 	}
 	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
 		Log.Error("push: post", "err", err)
-		return false
+		return 0, false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		Log.Error("push: unexpected status", "status", resp.StatusCode)
-		return false
+		return 0, false
 	}
-	return true
+	var ack pushAck
+	_ = json.NewDecoder(resp.Body).Decode(&ack)
+	return ack.LastSeenEventID, true
 }
 
 // resolveHeartbeatInterval reads HEARTBEAT_INTERVAL (Go duration) and
