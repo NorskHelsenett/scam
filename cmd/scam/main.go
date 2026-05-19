@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
 	"github.com/NorskHelsenett/scam/internal/collector"
 
 	corev1 "k8s.io/api/core/v1"
@@ -76,24 +75,23 @@ func main() {
 	}
 
 	// ---- cluster identity --------------------------------------------------
-	// ROR's clusterinterregator is the primary source; node annotations and
-	// helm-injected env vars are fallbacks when its provider detection can't
-	// classify the cluster (e.g. partial Vitistack annotation sets).
-	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
+	// Priority (per field):
+	//   Name:        ROR Self() → CLUSTER_NAME env
+	//   ID:          CLUSTER_ID env → kube-system namespace UID
+	//   Environment: ENVIRONMENT env
+	//
+	// ROR Self() only fires when ROR_API_ENDPOINT + ROR_API_KEY are set;
+	// without them SCAM lands on the env / kube-system chain.
+	rorName := fetchRorSelfName()
 
-	nodeList, _ := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
-	var nodes []corev1.Node
-	if nodeList != nil {
-		nodes = nodeList.Items
-	}
 	var kubeSystemUID string
 	if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
 		kubeSystemUID = string(ns.UID)
 	}
 
-	clusterID := resolveClusterID(ci.GetClusterId(), nodes, kubeSystemUID)
-	clusterName := resolveClusterName(ci.GetClusterName(), nodes)
-	environment := resolveEnvironment(ci.GetEnvironment(), nodes)
+	clusterName := resolveClusterName(rorName)
+	clusterID := resolveClusterID(kubeSystemUID)
+	environment := resolveEnvironment()
 
 	var clusterAttrs []any
 	if clusterName != "" {
@@ -342,81 +340,30 @@ func printBanner(clusterName, clusterID, environment, callcenter, version, commi
 	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
 }
 
-// ROR sentinel values from
-// github.com/NorskHelsenett/ror/pkg/kubernetes/providers/providermodels.
-// Returned by the unknown provider when nothing classifies.
-func isUnresolvedID(v string) bool {
-	return v == "" || v == "unknown-undefined" || v == "unknown-cluster-id"
-}
-func isUnresolvedName(v string) bool {
-	return v == "" || v == "unknown-undefined" || v == "unknown-cluster"
-}
-func isUnresolvedEnv(v string) bool {
-	return v == "" || v == "unknown-undefined" || v == "unknown-environment"
+// resolveClusterName priority:
+//  1. ROR API Self() (when ROR_API_ENDPOINT + ROR_API_KEY are set)
+//  2. CLUSTER_NAME env var (set in helm chart) — may be empty if unset
+func resolveClusterName(rorSelfName string) string {
+	if rorSelfName != "" {
+		return rorSelfName
+	}
+	return os.Getenv("CLUSTER_NAME")
 }
 
 // resolveClusterID priority:
-//  1. ROR clusterinterregator
-//  2. vitistack.io/clusterid annotation/label on any node
-//  3. kube-system namespace UID (stable per-cluster fingerprint)
-func resolveClusterID(primary string, nodes []corev1.Node, kubeSystemUID string) string {
-	if !isUnresolvedID(primary) {
-		return primary
-	}
-	if v := nodeMeta(nodes, "vitistack.io/clusterid"); v != "" {
+//  1. CLUSTER_ID env var
+//  2. kube-system namespace UID (stable per-cluster fingerprint)
+func resolveClusterID(kubeSystemUID string) string {
+	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
 		return v
 	}
 	return kubeSystemUID
 }
 
-// resolveClusterName priority:
-//  1. ROR clusterinterregator
-//  2. vitistack.io/clustername
-//  3. cluster.x-k8s.io/cluster-name (Cluster API standard)
-//  4. ror.io/name
-//  5. CLUSTER_NAME env var (set in helm chart) — may be empty if unset
-func resolveClusterName(primary string, nodes []corev1.Node) string {
-	if !isUnresolvedName(primary) {
-		return primary
-	}
-	for _, key := range []string{
-		"vitistack.io/clustername",
-		"cluster.x-k8s.io/cluster-name",
-		"ror.io/name",
-	} {
-		if v := nodeMeta(nodes, key); v != "" {
-			return v
-		}
-	}
-	return os.Getenv("CLUSTER_NAME")
-}
-
 // resolveEnvironment priority:
-//  1. ROR clusterinterregator
-//  2. vitistack.io/environment (test, prod, etc.)
-//  3. ENVIRONMENT env var — may be empty if unset
-func resolveEnvironment(primary string, nodes []corev1.Node) string {
-	if !isUnresolvedEnv(primary) {
-		return primary
-	}
-	if v := nodeMeta(nodes, "vitistack.io/environment"); v != "" {
-		return v
-	}
+//  1. ENVIRONMENT env var — may be empty if unset
+func resolveEnvironment() string {
 	return os.Getenv("ENVIRONMENT")
-}
-
-// nodeMeta returns the first non-empty value for `key` found in any
-// node's annotations or labels.
-func nodeMeta(nodes []corev1.Node, key string) string {
-	for _, n := range nodes {
-		if v, ok := n.Annotations[key]; ok && v != "" {
-			return v
-		}
-		if v, ok := n.Labels[key]; ok && v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {
