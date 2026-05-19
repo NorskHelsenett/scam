@@ -152,3 +152,72 @@ jobs:
           # so pushing to oci://registry/org/scam with name=helm lands at scam/helm
           helm package ${CHART_DIR}
           helm push "${OCI_NAME}-${NEW_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
+
+  helm-push-dev:
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Dev chart from every non-main push. PRs are skipped (they don't
+    # have access to write secrets anyway).
+    if: github.ref != 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78 # v3
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Log in to Helm Registry
+        run: |
+          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+
+      - name: Determine Helm repository
+        id: helm-repo
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+      - name: Package and push dev Helm chart
+        env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_VERSION: ${{ needs.build.outputs.version }}
+          HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
+        run: |
+          CHART_DIR=".cluster/scam"
+          OCI_NAME="helm-dev"
+
+          # SemVer prerelease identifiers must match [0-9A-Za-z-]+.
+          # Branch slug: flatten /, _, and anything else into '-'.
+          SLUG=$(echo "${GITHUB_REF_NAME}" | sed 's/[^A-Za-z0-9-]/-/g')
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          DEV_VERSION="0.0.0-${SLUG}.${SHORT_SHA}"
+
+          echo "DEV CHART VERSION: $DEV_VERSION"
+
+          yq e -i ".name = \"$OCI_NAME\" | .version = \"$DEV_VERSION\"" ${CHART_DIR}/Chart.yaml
+
+          # Pin the dev chart at the exact image this build produced.
+          IMAGE_REPO="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="${IMAGE_VERSION}@${IMAGE_DIGEST}"
+          yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
+          yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
+
+          helm package ${CHART_DIR}
+          helm push "${OCI_NAME}-${DEV_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
