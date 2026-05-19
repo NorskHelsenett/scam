@@ -9,7 +9,7 @@ import (
 	"github.com/NorskHelsenett/ror/pkg/clients/rorclient/v2/transports/resttransport/httpauthprovider"
 	"github.com/NorskHelsenett/ror/pkg/clients/rorclient/v2/transports/resttransport/httpclient"
 	identitymodels "github.com/NorskHelsenett/ror/pkg/models/identity"
-	"github.com/NorskHelsenett/ror/pkg/rorversion"
+	"github.com/NorskHelsenett/ror/pkg/config/rorversion"
 
 	"github.com/NorskHelsenett/scam/internal/collector"
 )
