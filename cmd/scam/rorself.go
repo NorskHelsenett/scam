@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -34,7 +35,7 @@ func fetchRorSelfName() string {
 	})
 	cli := rorclient.NewRorClient(transport)
 
-	self, err := cli.V2().Self().Get()
+	self, err := cli.V2().Self().Get(context.Background())
 	if err != nil {
 		collector.Log.Warn("ror self lookup failed", "err", err)
 		return ""
