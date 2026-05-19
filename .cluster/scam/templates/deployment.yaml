@@ -47,6 +47,19 @@ spec:
             - name: CALLCENTER_URL
               value: {{ .Values.callcenter | quote }}
             {{- end }}
+            {{- if .Values.ror.enabled }}
+            - name: ROR_API_ENDPOINT
+              value: {{ .Values.ror.endpoint | default "https://api.ror.nhn.no" | quote }}
+            - name: ROR_API_KEY
+              {{- if .Values.ror.apiKey }}
+              value: {{ .Values.ror.apiKey | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ror.apiKeySecret.name | quote }}
+                  key: {{ .Values.ror.apiKeySecret.key | quote }}
+              {{- end }}
+            {{- end }}
             - name: GOGC
               value: "50"
             - name: GOMEMLIMIT

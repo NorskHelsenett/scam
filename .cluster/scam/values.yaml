@@ -9,6 +9,22 @@ clusterName: ""
 environment: ""
 callcenter: "https://spam.sikkerhet.nhn.no"
 
+# ROR API identity lookup. When enabled, SCAM resolves the cluster name
+# from the ROR API (V2 Self()) using a cluster-scoped apikey, falling
+# back to CLUSTER_NAME env / kube-system UID if anything fails.
+ror:
+  enabled: false
+  # Override the default ROR endpoint. Empty → https://api.ror.nhn.no.
+  endpoint: ""
+  # Literal apikey value. Prefer apiKeySecret unless you really want
+  # the key inlined in the Release.
+  apiKey: ""
+  # Read the apikey from an existing Secret in the release namespace.
+  # Defaults match ror-agent's provisioning convention.
+  apiKeySecret:
+    name: rorapikey
+    key: APIKEY
+
 resources:
   requests:
     cpu: 10m
