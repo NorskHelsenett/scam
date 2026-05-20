@@ -25,42 +25,35 @@ import (
 // rorIdentity is what ROR knows about the cluster this agent runs in.
 // All fields are best-effort; consumers must tolerate empty values.
 type rorIdentity struct {
-	Slug        string // V2 Self() User.Name — the ROR-canonical cluster identifier
-	Environment string // /v1/clusters/<slug> environment field
+	Slug        string // V2 Self().User.Name — the canonical cluster identifier
+	Name        string // /v1/clusters/<slug>.clusterName — human-friendly display name
+	Environment string // /v1/clusters/<slug>.environment
 }
 
 // fetchRorIdentity resolves the cluster's ROR identity in two hops:
-// V2 Self() for the slug + Type assertion, then a direct GET to
-// /v1/clusters/<slug> for the environment (the V2 Self response
-// shape doesn't carry environment). Returns a zero value when ROR
-// can't be reached or the apikey can't be resolved — callers
-// continue down the env/UID fallback chain.
+// V2 Self() for the slug (and the Type=Cluster assertion), then
+// /v1/clusters/<slug> for display name + environment (Self()'s
+// response shape doesn't carry either). Returns a zero value when
+// ROR can't be reached or the apikey can't be resolved.
 func fetchRorIdentity(clientset *kubernetes.Clientset) rorIdentity {
 	var zero rorIdentity
 	endpoint := strings.TrimSpace(os.Getenv("ROR_API_ENDPOINT"))
 	if endpoint == "" {
-		collector.Log.Info("ror: skipping self lookup (ROR_API_ENDPOINT unset)")
 		return zero
 	}
-	apikey, source := resolveRorApiKey(clientset)
+	apikey := resolveRorApiKey(clientset)
 	if apikey == "" {
-		collector.Log.Warn("ror: apikey not resolved; falling back to env/UID chain")
 		return zero
 	}
-	collector.Log.Info("ror: apikey resolved", "source", source, "len", len(apikey))
-
 	slug := rorSelfLookup(endpoint, apikey)
 	if slug == "" {
 		return zero
 	}
-	return rorIdentity{
-		Slug:        slug,
-		Environment: rorClusterLookup(endpoint, apikey, slug),
-	}
+	name, env := rorClusterLookup(endpoint, apikey, slug)
+	return rorIdentity{Slug: slug, Name: name, Environment: env}
 }
 
 func rorSelfLookup(endpoint, apikey string) string {
-	collector.Log.Info("ror: self lookup begin", "endpoint", endpoint)
 	auth := httpauthprovider.NewAuthProvider(httpauthprovider.AuthPoviderTypeAPIKey, apikey)
 	transport := resttransport.NewRorHttpTransport(&httpclient.HttpTransportClientConfig{
 		BaseURL:      endpoint,
@@ -75,7 +68,6 @@ func rorSelfLookup(endpoint, apikey string) string {
 		collector.Log.Warn("ror self lookup failed", "err", err)
 		return ""
 	}
-	collector.Log.Info("ror: self lookup ok", "type", self.Type, "name", self.User.Name)
 	if self.Type != identitymodels.IdentityTypeCluster {
 		collector.Log.Warn("ror apikey is not bound to a cluster identity", "type", self.Type)
 		return ""
@@ -85,16 +77,16 @@ func rorSelfLookup(endpoint, apikey string) string {
 
 // rorClusterLookup hand-rolls the /v1/clusters/<slug> call instead of
 // going through rorclient.V2().Resources() — the typed SDK path
-// requires a GroupVersionKind we'd have to guess at, and we only want
+// needs a GroupVersionKind we'd have to guess at, and we only want
 // two fields off the response.
-func rorClusterLookup(endpoint, apikey, slug string) string {
+func rorClusterLookup(endpoint, apikey, slug string) (name, env string) {
 	url := strings.TrimRight(endpoint, "/") + "/v1/clusters/" + slug
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		collector.Log.Warn("ror cluster fetch build request failed", "err", err)
-		return ""
+		return "", ""
 	}
 	req.Header.Set("X-API-KEY", apikey)
 	req.Header.Set("Accept", "application/json")
@@ -102,7 +94,7 @@ func rorClusterLookup(endpoint, apikey, slug string) string {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		collector.Log.Warn("ror cluster fetch failed", "url", url, "err", err)
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 
@@ -110,7 +102,7 @@ func rorClusterLookup(endpoint, apikey, slug string) string {
 	if resp.StatusCode >= 300 {
 		collector.Log.Warn("ror cluster fetch non-2xx",
 			"url", url, "status", resp.StatusCode, "body", truncate(string(body), 512))
-		return ""
+		return "", ""
 	}
 	var out struct {
 		ClusterName string `json:"clusterName"`
@@ -118,40 +110,36 @@ func rorClusterLookup(endpoint, apikey, slug string) string {
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		collector.Log.Warn("ror cluster decode failed", "err", err, "body", truncate(string(body), 256))
-		return ""
+		return "", ""
 	}
-	collector.Log.Info("ror: cluster fetched", "slug", slug, "name", out.ClusterName, "env", out.Environment)
-	return strings.TrimSpace(out.Environment)
+	return strings.TrimSpace(out.ClusterName), strings.TrimSpace(out.Environment)
 }
 
-// resolveRorApiKey returns the apikey value and a short source label
-// for logging ("env:..." or "secret:<ns>/<name>"). The apikey value
-// itself is never logged.
-func resolveRorApiKey(clientset *kubernetes.Clientset) (string, string) {
+// resolveRorApiKey returns the apikey value, never logging the value
+// itself. Order: ROR_API_KEY env var (literal) → in-cluster Secret
+// pointed at by ROR_API_KEY_SECRET_NAMESPACE + _NAME + _KEY.
+func resolveRorApiKey(clientset *kubernetes.Clientset) string {
 	if v := strings.TrimSpace(os.Getenv("ROR_API_KEY")); v != "" {
-		return v, "env:ROR_API_KEY"
+		return v
 	}
 	ns := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAMESPACE"))
 	name := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAME"))
 	key := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_KEY"))
 	if ns == "" || name == "" || key == "" {
-		collector.Log.Warn("ror: apikey env vars incomplete",
-			"namespace_set", ns != "", "name_set", name != "", "key_set", key != "")
-		return "", ""
+		return ""
 	}
-	collector.Log.Info("ror: reading apikey secret", "ns", ns, "name", name, "key", key)
 	secret, err := clientset.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		collector.Log.Warn("ror apikey secret read failed", "ns", ns, "name", name, "err", err)
-		return "", ""
+		return ""
 	}
 	raw, ok := secret.Data[key]
 	if !ok || len(raw) == 0 {
 		collector.Log.Warn("ror apikey secret has no value at key",
 			"ns", ns, "name", name, "key", key, "keys_present", secretKeys(secret.Data))
-		return "", ""
+		return ""
 	}
-	return strings.TrimSpace(string(raw)), "secret:" + ns + "/" + name
+	return strings.TrimSpace(string(raw))
 }
 
 func secretKeys(data map[string][]byte) []string {

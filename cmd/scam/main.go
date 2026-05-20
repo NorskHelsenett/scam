@@ -76,9 +76,9 @@ func main() {
 
 	// ---- cluster identity --------------------------------------------------
 	// Priority (per field):
-	//   Name:        ROR Self() slug → CLUSTER_NAME env
+	//   Name:        ROR cluster object .clusterName → CLUSTER_NAME env
 	//   ID:          CLUSTER_ID env → ROR Self() slug → kube-system UID
-	//   Environment: ROR /v1/clusters/<slug>.environment → ENVIRONMENT env
+	//   Environment: ROR cluster object .environment → ENVIRONMENT env
 	//
 	// fetchRorIdentity only fires when ROR_API_ENDPOINT + an apikey
 	// (literal env or k8s Secret) are resolvable; without them SCAM
@@ -90,7 +90,7 @@ func main() {
 		kubeSystemUID = string(ns.UID)
 	}
 
-	clusterName := resolveClusterName(ror.Slug)
+	clusterName := resolveClusterName(ror.Name)
 	clusterID := resolveClusterID(ror.Slug, kubeSystemUID)
 	environment := resolveEnvironment(ror.Environment)
 
@@ -342,26 +342,26 @@ func printBanner(clusterName, clusterID, environment, callcenter, version, commi
 }
 
 // resolveClusterName priority:
-//  1. ROR API Self() (when ROR_API_ENDPOINT + ROR_API_KEY are set)
+//  1. ROR cluster object's display name (when fetched)
 //  2. CLUSTER_NAME env var (set in helm chart) — may be empty if unset
-func resolveClusterName(rorSelfName string) string {
-	if rorSelfName != "" {
-		return rorSelfName
+func resolveClusterName(rorName string) string {
+	if rorName != "" {
+		return rorName
 	}
 	return os.Getenv("CLUSTER_NAME")
 }
 
 // resolveClusterID priority:
 //  1. CLUSTER_ID env var (explicit override)
-//  2. ROR API Self() — the ROR-canonical cluster slug (e.g. t-tek-003-n2ua),
-//     used by SPAM/ROR to identify the cluster across systems
+//  2. ROR Self() slug (e.g. t-tek-003-n2ua) — the canonical identifier
+//     SPAM/ROR use to correlate the cluster across systems
 //  3. kube-system namespace UID (stable local fingerprint, last resort)
-func resolveClusterID(rorSelfName, kubeSystemUID string) string {
+func resolveClusterID(rorSlug, kubeSystemUID string) string {
 	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
 		return v
 	}
-	if rorSelfName != "" {
-		return rorSelfName
+	if rorSlug != "" {
+		return rorSlug
 	}
 	return kubeSystemUID
 }
