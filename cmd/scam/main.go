@@ -76,22 +76,23 @@ func main() {
 
 	// ---- cluster identity --------------------------------------------------
 	// Priority (per field):
-	//   Name:        ROR Self() → CLUSTER_NAME env
-	//   ID:          CLUSTER_ID env → kube-system namespace UID
-	//   Environment: ENVIRONMENT env
+	//   Name:        ROR Self() slug → CLUSTER_NAME env
+	//   ID:          CLUSTER_ID env → ROR Self() slug → kube-system UID
+	//   Environment: ROR /v1/clusters/<slug>.environment → ENVIRONMENT env
 	//
-	// ROR Self() only fires when ROR_API_ENDPOINT + ROR_API_KEY are set;
-	// without them SCAM lands on the env / kube-system chain.
-	rorName := fetchRorSelfName(clientset)
+	// fetchRorIdentity only fires when ROR_API_ENDPOINT + an apikey
+	// (literal env or k8s Secret) are resolvable; without them SCAM
+	// lands on the env / kube-system chain unchanged.
+	ror := fetchRorIdentity(clientset)
 
 	var kubeSystemUID string
 	if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
 		kubeSystemUID = string(ns.UID)
 	}
 
-	clusterName := resolveClusterName(rorName)
-	clusterID := resolveClusterID(rorName, kubeSystemUID)
-	environment := resolveEnvironment()
+	clusterName := resolveClusterName(ror.Slug)
+	clusterID := resolveClusterID(ror.Slug, kubeSystemUID)
+	environment := resolveEnvironment(ror.Environment)
 
 	var clusterAttrs []any
 	if clusterName != "" {
@@ -366,8 +367,12 @@ func resolveClusterID(rorSelfName, kubeSystemUID string) string {
 }
 
 // resolveEnvironment priority:
-//  1. ENVIRONMENT env var — may be empty if unset
-func resolveEnvironment() string {
+//  1. ROR cluster object's environment field (when fetched successfully)
+//  2. ENVIRONMENT env var — may be empty if unset
+func resolveEnvironment(rorEnv string) string {
+	if rorEnv != "" {
+		return rorEnv
+	}
 	return os.Getenv("ENVIRONMENT")
 }
 
