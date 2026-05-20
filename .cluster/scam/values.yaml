@@ -19,10 +19,13 @@ ror:
   # Literal apikey value. Prefer apiKeySecret unless you really want
   # the key inlined in the Release.
   apiKey: ""
-  # Read the apikey from an existing Secret in the release namespace.
-  # Defaults match ror-agent's provisioning convention.
+  # Read the apikey from an existing Secret. When `namespace` is empty
+  # the release namespace is used. If `namespace` is set to a different
+  # namespace, the chart provisions a least-privilege Role+RoleBinding
+  # there so SCAM's ServiceAccount can read this single Secret.
   apiKeySecret:
-    name: rorapikey
+    namespace: ""
+    name: ror-apikey
     key: APIKEY
 
 resources:

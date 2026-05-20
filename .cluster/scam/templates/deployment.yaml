@@ -50,15 +50,17 @@ spec:
             {{- if .Values.ror.enabled }}
             - name: ROR_API_ENDPOINT
               value: {{ .Values.ror.endpoint | default "https://api.ror.nhn.no" | quote }}
+            {{- if .Values.ror.apiKey }}
             - name: ROR_API_KEY
-              {{- if .Values.ror.apiKey }}
               value: {{ .Values.ror.apiKey | quote }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.ror.apiKeySecret.name | quote }}
-                  key: {{ .Values.ror.apiKeySecret.key | quote }}
-              {{- end }}
+            {{- else }}
+            - name: ROR_API_KEY_SECRET_NAMESPACE
+              value: {{ .Values.ror.apiKeySecret.namespace | default .Release.Namespace | quote }}
+            - name: ROR_API_KEY_SECRET_NAME
+              value: {{ .Values.ror.apiKeySecret.name | quote }}
+            - name: ROR_API_KEY_SECRET_KEY
+              value: {{ .Values.ror.apiKeySecret.key | quote }}
+            {{- end }}
             {{- end }}
             - name: GOGC
               value: "50"
