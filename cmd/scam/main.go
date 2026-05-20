@@ -82,7 +82,7 @@ func main() {
 	//
 	// ROR Self() only fires when ROR_API_ENDPOINT + ROR_API_KEY are set;
 	// without them SCAM lands on the env / kube-system chain.
-	rorName := fetchRorSelfName()
+	rorName := fetchRorSelfName(clientset)
 
 	var kubeSystemUID string
 	if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {

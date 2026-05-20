@@ -9,20 +9,33 @@ import (
 	"github.com/NorskHelsenett/ror/pkg/clients/rorclient/v2/transports/resttransport"
 	"github.com/NorskHelsenett/ror/pkg/clients/rorclient/v2/transports/resttransport/httpauthprovider"
 	"github.com/NorskHelsenett/ror/pkg/clients/rorclient/v2/transports/resttransport/httpclient"
-	identitymodels "github.com/NorskHelsenett/ror/pkg/models/identity"
 	"github.com/NorskHelsenett/ror/pkg/config/rorversion"
+	identitymodels "github.com/NorskHelsenett/ror/pkg/models/identity"
 
 	"github.com/NorskHelsenett/scam/internal/collector"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // fetchRorSelfName asks ROR for the cluster identity bound to the
-// mounted apikey. Returns "" (not an error) when ROR_API_ENDPOINT or
-// ROR_API_KEY are unset, or when the call/assertion fails — callers
-// continue down the env/kube-system fallback chain.
-func fetchRorSelfName() string {
+// mounted apikey. Returns "" (not an error) when the endpoint or the
+// apikey can't be resolved — callers continue down the env/kube-system
+// fallback chain.
+//
+// Apikey resolution order:
+//  1. ROR_API_KEY env var (literal value)
+//  2. K8s Secret pointed at by ROR_API_KEY_SECRET_NAMESPACE +
+//     ROR_API_KEY_SECRET_NAME + ROR_API_KEY_SECRET_KEY (read via the
+//     in-cluster client — RBAC-gated)
+func fetchRorSelfName(clientset *kubernetes.Clientset) string {
 	endpoint := strings.TrimSpace(os.Getenv("ROR_API_ENDPOINT"))
-	apikey := strings.TrimSpace(os.Getenv("ROR_API_KEY"))
-	if endpoint == "" || apikey == "" {
+	if endpoint == "" {
+		return ""
+	}
+
+	apikey := resolveRorApiKey(clientset)
+	if apikey == "" {
 		return ""
 	}
 
@@ -45,4 +58,27 @@ func fetchRorSelfName() string {
 		return ""
 	}
 	return strings.TrimSpace(self.User.Name)
+}
+
+func resolveRorApiKey(clientset *kubernetes.Clientset) string {
+	if v := strings.TrimSpace(os.Getenv("ROR_API_KEY")); v != "" {
+		return v
+	}
+	ns := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAMESPACE"))
+	name := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAME"))
+	key := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_KEY"))
+	if ns == "" || name == "" || key == "" {
+		return ""
+	}
+	secret, err := clientset.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		collector.Log.Warn("ror apikey secret read failed", "ns", ns, "name", name, "err", err)
+		return ""
+	}
+	raw, ok := secret.Data[key]
+	if !ok || len(raw) == 0 {
+		collector.Log.Warn("ror apikey secret has no value at key", "ns", ns, "name", name, "key", key)
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
