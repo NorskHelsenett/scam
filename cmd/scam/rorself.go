@@ -31,13 +31,17 @@ import (
 func fetchRorSelfName(clientset *kubernetes.Clientset) string {
 	endpoint := strings.TrimSpace(os.Getenv("ROR_API_ENDPOINT"))
 	if endpoint == "" {
+		collector.Log.Info("ror: skipping self lookup (ROR_API_ENDPOINT unset)")
 		return ""
 	}
+	collector.Log.Info("ror: self lookup begin", "endpoint", endpoint)
 
-	apikey := resolveRorApiKey(clientset)
+	apikey, source := resolveRorApiKey(clientset)
 	if apikey == "" {
+		collector.Log.Warn("ror: apikey not resolved; falling back to env/UID chain")
 		return ""
 	}
+	collector.Log.Info("ror: apikey resolved", "source", source, "len", len(apikey))
 
 	auth := httpauthprovider.NewAuthProvider(httpauthprovider.AuthPoviderTypeAPIKey, apikey)
 	transport := resttransport.NewRorHttpTransport(&httpclient.HttpTransportClientConfig{
@@ -53,6 +57,7 @@ func fetchRorSelfName(clientset *kubernetes.Clientset) string {
 		collector.Log.Warn("ror self lookup failed", "err", err)
 		return ""
 	}
+	collector.Log.Info("ror: self lookup ok", "type", self.Type, "name", self.User.Name)
 	if self.Type != identitymodels.IdentityTypeCluster {
 		collector.Log.Warn("ror apikey is not bound to a cluster identity", "type", self.Type)
 		return ""
@@ -60,25 +65,40 @@ func fetchRorSelfName(clientset *kubernetes.Clientset) string {
 	return strings.TrimSpace(self.User.Name)
 }
 
-func resolveRorApiKey(clientset *kubernetes.Clientset) string {
+// resolveRorApiKey returns the apikey value and a short source label
+// for logging ("env" or "secret:<ns>/<name>"). The apikey value itself
+// is never logged.
+func resolveRorApiKey(clientset *kubernetes.Clientset) (string, string) {
 	if v := strings.TrimSpace(os.Getenv("ROR_API_KEY")); v != "" {
-		return v
+		return v, "env:ROR_API_KEY"
 	}
 	ns := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAMESPACE"))
 	name := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAME"))
 	key := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_KEY"))
 	if ns == "" || name == "" || key == "" {
-		return ""
+		collector.Log.Warn("ror: apikey env vars incomplete",
+			"namespace_set", ns != "", "name_set", name != "", "key_set", key != "")
+		return "", ""
 	}
+	collector.Log.Info("ror: reading apikey secret", "ns", ns, "name", name, "key", key)
 	secret, err := clientset.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		collector.Log.Warn("ror apikey secret read failed", "ns", ns, "name", name, "err", err)
-		return ""
+		return "", ""
 	}
 	raw, ok := secret.Data[key]
 	if !ok || len(raw) == 0 {
-		collector.Log.Warn("ror apikey secret has no value at key", "ns", ns, "name", name, "key", key)
-		return ""
+		collector.Log.Warn("ror apikey secret has no value at key",
+			"ns", ns, "name", name, "key", key, "keys_present", secretKeys(secret.Data))
+		return "", ""
 	}
-	return strings.TrimSpace(string(raw))
+	return strings.TrimSpace(string(raw)), "secret:" + ns + "/" + name
+}
+
+func secretKeys(data map[string][]byte) []string {
+	out := make([]string, 0, len(data))
+	for k := range data {
+		out = append(out, k)
+	}
+	return out
 }
