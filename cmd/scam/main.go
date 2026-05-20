@@ -90,7 +90,7 @@ func main() {
 	}
 
 	clusterName := resolveClusterName(rorName)
-	clusterID := resolveClusterID(kubeSystemUID)
+	clusterID := resolveClusterID(rorName, kubeSystemUID)
 	environment := resolveEnvironment()
 
 	var clusterAttrs []any
@@ -351,11 +351,16 @@ func resolveClusterName(rorSelfName string) string {
 }
 
 // resolveClusterID priority:
-//  1. CLUSTER_ID env var
-//  2. kube-system namespace UID (stable per-cluster fingerprint)
-func resolveClusterID(kubeSystemUID string) string {
+//  1. CLUSTER_ID env var (explicit override)
+//  2. ROR API Self() — the ROR-canonical cluster slug (e.g. t-tek-003-n2ua),
+//     used by SPAM/ROR to identify the cluster across systems
+//  3. kube-system namespace UID (stable local fingerprint, last resort)
+func resolveClusterID(rorSelfName, kubeSystemUID string) string {
 	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
 		return v
+	}
+	if rorSelfName != "" {
+		return rorSelfName
 	}
 	return kubeSystemUID
 }
