@@ -22,6 +22,20 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+const (
+	envRorAPIEndpoint      = "ROR_API_ENDPOINT"
+	envRorAPIKey           = "ROR_API_KEY"
+	envRorAPIKeySecretNS   = "ROR_API_KEY_SECRET_NAMESPACE"
+	envRorAPIKeySecretName = "ROR_API_KEY_SECRET_NAME"
+	envRorAPIKeySecretKey  = "ROR_API_KEY_SECRET_KEY"
+
+	rorLookupTimeout = 10 * time.Second
+)
+
+// httpClient is reused for both ROR HTTP calls so a hung TCP connect
+// can't outlive the per-call context grace.
+var httpClient = &http.Client{Timeout: rorLookupTimeout}
+
 // rorIdentity is what ROR knows about the cluster this agent runs in.
 // All fields are best-effort; consumers must tolerate empty values.
 type rorIdentity struct {
@@ -30,24 +44,18 @@ type rorIdentity struct {
 	Environment string // /v1/clusters/<slug>.environment
 }
 
+// rorEndpoint returns the configured ROR API endpoint (empty disables ROR lookup).
+func rorEndpoint() string { return strings.TrimSpace(os.Getenv(envRorAPIEndpoint)) }
+
 // fetchRorIdentity resolves the cluster's ROR identity in two hops:
 // V2 Self() for the slug (and the Type=Cluster assertion), then
 // /v1/clusters/<slug> for display name + environment (Self()'s
 // response shape doesn't carry either). Returns a zero value when
-// ROR can't be reached or the apikey can't be resolved.
-func fetchRorIdentity(clientset *kubernetes.Clientset) rorIdentity {
-	var zero rorIdentity
-	endpoint := strings.TrimSpace(os.Getenv("ROR_API_ENDPOINT"))
-	if endpoint == "" {
-		return zero
-	}
-	apikey := resolveRorApiKey(clientset)
-	if apikey == "" {
-		return zero
-	}
+// either call fails.
+func fetchRorIdentity(endpoint, apikey string) rorIdentity {
 	slug := rorSelfLookup(endpoint, apikey)
 	if slug == "" {
-		return zero
+		return rorIdentity{}
 	}
 	name, env := rorClusterLookup(endpoint, apikey, slug)
 	return rorIdentity{Slug: slug, Name: name, Environment: env}
@@ -63,7 +71,9 @@ func rorSelfLookup(endpoint, apikey string) string {
 	})
 	cli := rorclient.NewRorClient(transport)
 
-	self, err := cli.V2().Self().Get(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), rorLookupTimeout)
+	defer cancel()
+	self, err := cli.V2().Self().Get(ctx)
 	if err != nil {
 		collector.Log.Warn("ror self lookup failed", "err", err)
 		return ""
@@ -81,7 +91,7 @@ func rorSelfLookup(endpoint, apikey string) string {
 // two fields off the response.
 func rorClusterLookup(endpoint, apikey, slug string) (name, env string) {
 	url := strings.TrimRight(endpoint, "/") + "/v1/clusters/" + slug
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rorLookupTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -91,7 +101,7 @@ func rorClusterLookup(endpoint, apikey, slug string) (name, env string) {
 	req.Header.Set("X-API-KEY", apikey)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		collector.Log.Warn("ror cluster fetch failed", "url", url, "err", err)
 		return "", ""
@@ -119,16 +129,18 @@ func rorClusterLookup(endpoint, apikey, slug string) (name, env string) {
 // itself. Order: ROR_API_KEY env var (literal) → in-cluster Secret
 // pointed at by ROR_API_KEY_SECRET_NAMESPACE + _NAME + _KEY.
 func resolveRorApiKey(clientset *kubernetes.Clientset) string {
-	if v := strings.TrimSpace(os.Getenv("ROR_API_KEY")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(envRorAPIKey)); v != "" {
 		return v
 	}
-	ns := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAMESPACE"))
-	name := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_NAME"))
-	key := strings.TrimSpace(os.Getenv("ROR_API_KEY_SECRET_KEY"))
+	ns := strings.TrimSpace(os.Getenv(envRorAPIKeySecretNS))
+	name := strings.TrimSpace(os.Getenv(envRorAPIKeySecretName))
+	key := strings.TrimSpace(os.Getenv(envRorAPIKeySecretKey))
 	if ns == "" || name == "" || key == "" {
 		return ""
 	}
-	secret, err := clientset.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), rorLookupTimeout)
+	defer cancel()
+	secret, err := clientset.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		collector.Log.Warn("ror apikey secret read failed", "ns", ns, "name", name, "err", err)
 		return ""

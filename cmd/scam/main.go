@@ -75,23 +75,21 @@ func main() {
 	}
 
 	// ---- cluster identity --------------------------------------------------
-	// Priority (per field):
-	//   Name:        ROR cluster object .clusterName → CLUSTER_NAME env
-	//   ID:          CLUSTER_ID env → ROR Self() slug → kube-system UID
-	//   Environment: ROR cluster object .environment → ENVIRONMENT env
-	//
-	// fetchRorIdentity only fires when ROR_API_ENDPOINT + an apikey
-	// (literal env or k8s Secret) are resolvable; without them SCAM
-	// lands on the env / kube-system chain unchanged.
-	ror := fetchRorIdentity(clientset)
-
-	var kubeSystemUID string
-	if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
-		kubeSystemUID = string(ns.UID)
+	// See resolveCluster* helpers below for per-field priority.
+	var ror rorIdentity
+	if endpoint := rorEndpoint(); endpoint != "" {
+		if apikey := resolveRorApiKey(clientset); apikey != "" {
+			ror = fetchRorIdentity(endpoint, apikey)
+		}
 	}
 
 	clusterName := resolveClusterName(ror.Name)
-	clusterID := resolveClusterID(ror.Slug, kubeSystemUID)
+	clusterID := resolveClusterID(ror.Slug, func() string {
+		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
+			return string(ns.UID)
+		}
+		return ""
+	})
 	environment := resolveEnvironment(ror.Environment)
 
 	var clusterAttrs []any
@@ -105,6 +103,17 @@ func main() {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
 	clusterAttrs = append(clusterAttrs, "version", version, "commit", commit)
+
+	// LineCapture + JSON handler get installed here when CALLCENTER_URL is
+	// set so every subsequent log line (informer setup, cache sync, the
+	// initial snapshot) is buffered for push. PushLoop itself starts later
+	// — once podInf exists — so the ACK-mismatch trigger has a snapshot
+	// target to fire.
+	var pushCapture *collector.LineCapture
+	if callcenterURL != "" {
+		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
+		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
 	collector.Log = collector.Log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
@@ -124,16 +133,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// LineCapture + logger get set up here so every subsequent log line
-	// (informer setup, cache sync, the initial snapshot) is buffered for
-	// push. PushLoop itself starts later — once podInf exists — so the
-	// ACK-mismatch trigger has a snapshot target to fire.
-	var pushCapture *collector.LineCapture
 	var pushEndpoint string
 	if callcenterURL != "" {
-		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
-		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
-		collector.Log = collector.Log.With(clusterAttrs...)
 		base := strings.TrimRight(callcenterURL, "/")
 		pushEndpoint = base + "/api/scam/callcenter"
 		// Keep the server's session alive on quiet clusters — without
@@ -356,14 +357,17 @@ func resolveClusterName(rorName string) string {
 //  2. ROR Self() slug (e.g. t-tek-003-n2ua) — the canonical identifier
 //     SPAM/ROR use to correlate the cluster across systems
 //  3. kube-system namespace UID (stable local fingerprint, last resort)
-func resolveClusterID(rorSlug, kubeSystemUID string) string {
+//
+// kubeSystemUID is a thunk so the API call is skipped when CLUSTER_ID or
+// rorSlug already satisfies the lookup (the common deployed path).
+func resolveClusterID(rorSlug string, kubeSystemUID func() string) string {
 	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
 		return v
 	}
 	if rorSlug != "" {
 		return rorSlug
 	}
-	return kubeSystemUID
+	return kubeSystemUID()
 }
 
 // resolveEnvironment priority:
