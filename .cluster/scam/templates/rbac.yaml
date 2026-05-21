@@ -65,18 +65,16 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
 {{- if and .Values.ror.enabled (not .Values.ror.apiKey) }}
-{{- $ns := .Values.ror.apiKeySecret.namespace | default .Release.Namespace }}
 ---
-# Read access to the ROR apikey Secret. Scoped via resourceNames to
-# just this one Secret, so the binding grants nothing else. Rendered
-# whether the apikey lives in the release namespace or another one —
-# the existing ClusterRole doesn't grant secrets, so we need a Role
-# regardless.
+# Read access to the ROR apikey Secret. ClusterRole + ClusterRoleBinding
+# so the chart doesn't have to touch the apikey's namespace at all.
+# Scoped via resourceNames to the configured Secret name only — broader
+# than a namespaced Role (matches in every namespace that happens to
+# hold a Secret of that name), narrower than blanket 'get secrets'.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: {{ .Release.Name }}-ror-self-reader
-  namespace: {{ $ns }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -88,10 +86,9 @@ rules:
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-ror-self-reader
-  namespace: {{ $ns }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -101,7 +98,7 @@ subjects:
     name: {{ .Release.Name }}
     namespace: {{ .Release.Namespace }}
 roleRef:
-  kind: Role
+  kind: ClusterRole
   name: {{ .Release.Name }}-ror-self-reader
   apiGroup: rbac.authorization.k8s.io
 {{- end }}

@@ -20,9 +20,10 @@ ror:
   # the key inlined in the Release.
   apiKey: ""
   # Read the apikey from an existing Secret. When `namespace` is empty
-  # the release namespace is used. If `namespace` is set to a different
-  # namespace, the chart provisions a least-privilege Role+RoleBinding
-  # there so SCAM's ServiceAccount can read this single Secret.
+  # the release namespace is used. The chart provisions a cluster-scoped
+  # ClusterRole+ClusterRoleBinding granting `get` on Secrets whose name
+  # matches `apiKeySecret.name` — the chart never has to create resources
+  # in the apikey's own namespace.
   apiKeySecret:
     namespace: ""
     name: ror-apikey
