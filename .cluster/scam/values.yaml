@@ -19,13 +19,15 @@ ror:
   # Literal apikey value. Prefer apiKeySecret unless you really want
   # the key inlined in the Release.
   apiKey: ""
-  # Read the apikey from an existing Secret. When `namespace` is empty
-  # the release namespace is used. The chart provisions a cluster-scoped
-  # ClusterRole+ClusterRoleBinding granting `get` on Secrets whose name
-  # matches `apiKeySecret.name` — the chart never has to create resources
-  # in the apikey's own namespace.
+  # Read the apikey from an existing Secret. Defaults point at NHN's
+  # central ROR namespace (`nhn-ror`) where the cluster-scoped apikey
+  # actually lives — set `namespace: ""` to fall back to the release
+  # namespace, or override to wherever a co-located apikey is stored.
+  # The chart provisions a cluster-scoped ClusterRole+ClusterRoleBinding
+  # granting `get` on Secrets whose name matches `apiKeySecret.name` —
+  # the chart never has to create resources in the apikey's own namespace.
   apiKeySecret:
-    namespace: ""
+    namespace: "nhn-ror"
     name: ror-apikey
     key: APIKEY
 
