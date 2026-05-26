@@ -84,7 +84,7 @@ func main() {
 	}
 
 	clusterName := resolveClusterName(ror.Name)
-	clusterID := resolveClusterID(ror.Slug, func() string {
+	clusterID := resolveClusterID(func() string {
 		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
 			return string(ns.UID)
 		}
@@ -102,6 +102,17 @@ func main() {
 	if environment != "" {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
+	// ror_metadata is a nested group, emitted only when ROR lookup
+	// succeeded. SPAM joins on top-level cluster_id (kube-system UID)
+	// regardless, and uses ror_metadata.cluster_id to map the cluster
+	// onto ROR's ACL/display when present.
+	if ror.Slug != "" {
+		clusterAttrs = append(clusterAttrs, slog.Group("ror_metadata",
+			"cluster_id", ror.Slug,
+			"cluster_name", ror.Name,
+			"env", ror.Environment,
+		))
+	}
 	clusterAttrs = append(clusterAttrs, "version", version, "commit", commit)
 
 	// LineCapture + JSON handler get installed here when CALLCENTER_URL is
@@ -117,7 +128,7 @@ func main() {
 	collector.Log = collector.Log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
-	printBanner(clusterName, clusterID, environment, callcenterURL, version, commit)
+	printBanner(clusterName, clusterID, environment, ror.Slug, callcenterURL, version, commit)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -310,15 +321,21 @@ func main() {
 	collector.Log.Info("shutdown")
 }
 
-func printBanner(clusterName, clusterID, environment, callcenter, version, commit string) {
+// rorSlug is included as a separate banner line (when non-empty) so an
+// operator can tell at a glance whether the ROR binding succeeded \u2014
+// cluster_id is always the kube-system UID now and won't reveal that.
+func printBanner(clusterName, clusterID, environment, rorSlug, callcenter, version, commit string) {
 	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
 	lines := []string{
 		fmt.Sprintf("version:     %s (%s)", version, commit),
 		fmt.Sprintf("cluster:     %s", clusterName),
 		fmt.Sprintf("cluster_id:  %s", clusterID),
 		fmt.Sprintf("environment: %s", environment),
-		fmt.Sprintf("callcenter:  %s", callcenter),
 	}
+	if rorSlug != "" {
+		lines = append(lines, fmt.Sprintf("ror_slug:    %s", rorSlug))
+	}
+	lines = append(lines, fmt.Sprintf("callcenter:  %s", callcenter))
 
 	maxW := utf8.RuneCountInString(title)
 	for _, l := range lines {
@@ -354,18 +371,19 @@ func resolveClusterName(rorName string) string {
 
 // resolveClusterID priority:
 //  1. CLUSTER_ID env var (explicit override)
-//  2. ROR Self() slug (e.g. t-tek-003-n2ua) — the canonical identifier
-//     SPAM/ROR use to correlate the cluster across systems
-//  3. kube-system namespace UID (stable local fingerprint, last resort)
+//  2. kube-system namespace UID — the Kubernetes-canonical
+//     "this install" fingerprint (k8s.cluster.uid); stable for the
+//     cluster's lifespan and the join key SPAM uses across sources.
 //
-// kubeSystemUID is a thunk so the API call is skipped when CLUSTER_ID or
-// rorSlug already satisfies the lookup (the common deployed path).
-func resolveClusterID(rorSlug string, kubeSystemUID func() string) string {
+// The ROR slug is intentionally *not* part of this chain — it's ROR
+// binding metadata, not cluster identity, and is emitted separately
+// under ror_metadata.cluster_id.
+//
+// kubeSystemUID is a thunk so the API call is skipped when CLUSTER_ID
+// already satisfies the lookup.
+func resolveClusterID(kubeSystemUID func() string) string {
 	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
 		return v
-	}
-	if rorSlug != "" {
-		return rorSlug
 	}
 	return kubeSystemUID()
 }

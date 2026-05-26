@@ -38,8 +38,12 @@ var httpClient = &http.Client{Timeout: rorLookupTimeout}
 
 // rorIdentity is what ROR knows about the cluster this agent runs in.
 // All fields are best-effort; consumers must tolerate empty values.
+//
+// None of these fields are the cluster's primary identity — that is the
+// kube-system namespace UID, resolved in main. The ROR fields are ACL/
+// display metadata emitted under ror_metadata.
 type rorIdentity struct {
-	Slug        string // V2 Self().User.Name — the canonical cluster identifier
+	Slug        string // V2 Self().User.Name — ROR's binding for this cluster (emitted as ror_metadata.cluster_id)
 	Name        string // /v1/clusters/<slug>.clusterName — human-friendly display name
 	Environment string // /v1/clusters/<slug>.environment
 }
