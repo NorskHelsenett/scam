@@ -9,11 +9,14 @@ clusterName: ""
 environment: ""
 callcenter: "https://spam.sikkerhet.nhn.no"
 
-# ROR API identity lookup. When enabled, SCAM resolves the cluster name
-# from the ROR API (V2 Self()) using a cluster-scoped apikey, falling
-# back to CLUSTER_NAME env / kube-system UID if anything fails.
+# ROR API identity lookup. Resolves the cluster name and environment
+# from the ROR API (V2 Self() + /v1/clusters/<slug>) using a
+# cluster-scoped apikey, falling back to CLUSTER_NAME env / kube-system
+# UID if anything fails. Enabled by default for NHN's central setup
+# where the apikey Secret lives in `nhn-ror`; flip to false in
+# environments without a ROR binding to silence the not-found warning.
 ror:
-  enabled: false
+  enabled: true
   # Override the default ROR endpoint. Empty → https://api.ror.nhn.no.
   endpoint: ""
   # Literal apikey value. Prefer apiKeySecret unless you really want
