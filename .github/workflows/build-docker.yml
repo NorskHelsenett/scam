@@ -37,7 +37,7 @@ jobs:
         with:
           registry: ${{ steps.registry.outputs.registry }}
           username: ${{ github.actor }}
-          password: ${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}
+          password: ${{ secrets.PACKAGES_TOKEN || github.token }}
 
       - name: Resolve image name
         id: image
@@ -106,7 +106,7 @@ jobs:
 
       - name: Log in to Helm Registry
         run: |
-          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
 
       - name: Determine Helm repository
         id: helm-repo
@@ -185,7 +185,7 @@ jobs:
 
       - name: Log in to Helm Registry
         run: |
-          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
 
       - name: Determine Helm repository
         id: helm-repo
