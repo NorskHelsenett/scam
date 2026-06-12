@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -30,6 +31,12 @@ const (
 	envRorAPIKeySecretKey  = "ROR_API_KEY_SECRET_KEY"
 
 	rorLookupTimeout = 10 * time.Second
+
+	defaultRorRefreshInterval = 1 * time.Hour
+	// rorRetryInterval is the tighter cadence used while the identity is
+	// still unresolved — e.g. the agent started before the cluster was
+	// registered in ROR or before the apikey Secret existed.
+	rorRetryInterval = 10 * time.Minute
 )
 
 // httpClient is reused for both ROR HTTP calls so a hung TCP connect
@@ -50,6 +57,110 @@ type rorIdentity struct {
 
 // rorEndpoint returns the configured ROR API endpoint (empty disables ROR lookup).
 func rorEndpoint() string { return strings.TrimSpace(os.Getenv(envRorAPIEndpoint)) }
+
+// clusterAttrSet builds the identity attribute set stamped on every
+// emitted record (via collector.SetClusterAttrs). ror_metadata is a
+// nested group, emitted only when ROR lookup succeeded. SPAM joins on
+// top-level cluster_id (kube-system UID) regardless, and uses
+// ror_metadata.cluster_id to map the cluster onto ROR's ACL/display
+// when present.
+func clusterAttrSet(clusterName, clusterID, environment string, ror rorIdentity) []slog.Attr {
+	var attrs []slog.Attr
+	if clusterName != "" {
+		attrs = append(attrs, slog.String("cluster", clusterName))
+	}
+	if clusterID != "" {
+		attrs = append(attrs, slog.String("cluster_id", clusterID))
+	}
+	if environment != "" {
+		attrs = append(attrs, slog.String("environment", environment))
+	}
+	if ror.Slug != "" {
+		attrs = append(attrs, slog.Group("ror_metadata",
+			"cluster_id", ror.Slug,
+			"cluster_name", ror.Name,
+			"env", ror.Environment,
+		))
+	}
+	attrs = append(attrs, slog.String("version", version), slog.String("commit", commit))
+	return attrs
+}
+
+// rorIdentityLoop periodically re-resolves the cluster's ROR identity
+// and swaps the record attrs when it changes. A one-shot boot lookup
+// misses two real cases:
+//   - the agent started before the cluster was registered in ROR (or
+//     before the apikey Secret existed), so the binding appears later;
+//   - ROR renames the cluster's identity (e.g. a slug → UUID
+//     migration), which every running agent would otherwise keep
+//     pushing stale until restarted.
+//
+// The apikey is re-read from env/Secret each round so a Secret created
+// or rotated after boot is picked up too. A transient lookup failure
+// keeps the current identity — attrs only change on a successful,
+// different resolution. Cadence is ROR_REFRESH_INTERVAL (default 1h,
+// "off"/"0" disables), tightened to rorRetryInterval while unresolved.
+func rorIdentityLoop(ctx context.Context, clientset *kubernetes.Clientset, clusterID string, current rorIdentity) {
+	endpoint := rorEndpoint()
+	if endpoint == "" {
+		return
+	}
+	interval := resolveRorRefreshInterval()
+	if interval <= 0 {
+		collector.Log.Info("ror refresh: disabled")
+		return
+	}
+	next := func() time.Duration {
+		if current == (rorIdentity{}) {
+			return min(rorRetryInterval, interval)
+		}
+		return interval
+	}
+	collector.Log.Info("ror refresh: scheduled", "interval", interval, "next", next())
+
+	timer := time.NewTimer(next())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		if apikey := resolveRorApiKey(clientset); apikey != "" {
+			if id := fetchRorIdentity(endpoint, apikey); id != (rorIdentity{}) && id != current {
+				name := resolveClusterName(id.Name)
+				env := resolveEnvironment(id.Environment)
+				collector.SetClusterAttrs(clusterAttrSet(name, clusterID, env, id))
+				collector.Log.Info("ror identity updated",
+					"ror_cluster_id", id.Slug,
+					"previous_ror_cluster_id", current.Slug,
+					"cluster", name,
+					"environment", env)
+				current = id
+			}
+		}
+		timer.Reset(next())
+	}
+}
+
+func resolveRorRefreshInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ROR_REFRESH_INTERVAL"))
+	if raw == "" {
+		return defaultRorRefreshInterval
+	}
+	if strings.EqualFold(raw, "off") || strings.EqualFold(raw, "disabled") || raw == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Minute {
+		collector.Log.Warn("ror refresh: invalid ROR_REFRESH_INTERVAL, using default",
+			"value", raw, "default", defaultRorRefreshInterval)
+		return defaultRorRefreshInterval
+	}
+	return d
+}
 
 // fetchRorIdentity resolves the cluster's ROR identity in two hops:
 // V2 Self() for the slug (and the Type=Cluster assertion), then

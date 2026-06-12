@@ -33,6 +33,16 @@ ror:
     namespace: "nhn-ror"
     name: ror-apikey
     key: APIKEY
+  # How often the agent re-resolves its ROR identity, so a binding
+  # created after boot or renamed by ROR (e.g. slug → UUID migration)
+  # is picked up without a restart. Go duration; "off" disables.
+  # Empty → agent default (1h, retrying every 10m while unresolved).
+  refreshInterval: ""
+
+# Kubernetes client rate limits. Raise on very large clusters if the
+# initial informer cache sync is slow. Empty → agent defaults (5 / 10).
+kubeClientQPS: ""
+kubeClientBurst: ""
 
 resources:
   requests:

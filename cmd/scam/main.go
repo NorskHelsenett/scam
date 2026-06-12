@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/NorskHelsenett/scam/internal/collector"
@@ -65,8 +67,10 @@ func main() {
 		collector.Log.Error("load kube config", "err", err)
 		os.Exit(1)
 	}
-	cfg.QPS = 5
-	cfg.Burst = 10
+	// Conservative defaults; on very large clusters the initial informer
+	// LISTs are throttled by these — raise via env if cache sync is slow.
+	cfg.QPS = envFloat32("KUBE_CLIENT_QPS", 5)
+	cfg.Burst = envInt("KUBE_CLIENT_BURST", 10)
 
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
@@ -85,47 +89,37 @@ func main() {
 
 	clusterName := resolveClusterName(ror.Name)
 	clusterID := resolveClusterID(func() string {
-		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if ns, err := clientset.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{}); err == nil {
 			return string(ns.UID)
 		}
 		return ""
 	})
 	environment := resolveEnvironment(ror.Environment)
 
-	var clusterAttrs []any
-	if clusterName != "" {
-		clusterAttrs = append(clusterAttrs, "cluster", clusterName)
-	}
-	if clusterID != "" {
-		clusterAttrs = append(clusterAttrs, "cluster_id", clusterID)
-	}
-	if environment != "" {
-		clusterAttrs = append(clusterAttrs, "environment", environment)
-	}
-	// ror_metadata is a nested group, emitted only when ROR lookup
-	// succeeded. SPAM joins on top-level cluster_id (kube-system UID)
-	// regardless, and uses ror_metadata.cluster_id to map the cluster
-	// onto ROR's ACL/display when present.
-	if ror.Slug != "" {
-		clusterAttrs = append(clusterAttrs, slog.Group("ror_metadata",
-			"cluster_id", ror.Slug,
-			"cluster_name", ror.Name,
-			"env", ror.Environment,
-		))
-	}
-	clusterAttrs = append(clusterAttrs, "version", version, "commit", commit)
-
 	// LineCapture + JSON handler get installed here when CALLCENTER_URL is
 	// set so every subsequent log line (informer setup, cache sync, the
 	// initial snapshot) is buffered for push. PushLoop itself starts later
 	// — once podInf exists — so the ACK-mismatch trigger has a snapshot
 	// target to fire.
+	//
+	// Identity attrs are injected per-record via WithClusterAttrs rather
+	// than Logger.With so rorIdentityLoop can swap them when the ROR
+	// binding appears or changes after boot.
+	logOpts := &slog.HandlerOptions{Level: slog.LevelInfo}
 	var pushCapture *collector.LineCapture
+	logDst := io.Writer(os.Stdout)
 	if callcenterURL != "" {
 		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
-		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logDst = pushCapture
 	}
-	collector.Log = collector.Log.With(clusterAttrs...)
+	collector.Log = slog.New(collector.WithClusterAttrs(slog.NewJSONHandler(logDst, logOpts)))
+	collector.LogLocal = collector.Log
+	if pushCapture != nil {
+		collector.LogLocal = slog.New(collector.WithClusterAttrs(slog.NewJSONHandler(os.Stdout, logOpts)))
+	}
+	collector.SetClusterAttrs(clusterAttrSet(clusterName, clusterID, environment, ror))
 
 	// ---- startup banner ----------------------------------------------------
 	printBanner(clusterName, clusterID, environment, ror.Slug, callcenterURL, version, commit)
@@ -143,6 +137,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Re-resolve the ROR identity in the background so a binding that
+	// appears (or is renamed) after boot reaches the emitted records
+	// without a restart.
+	go rorIdentityLoop(ctx, clientset, clusterID, ror)
 
 	var pushEndpoint string
 	if callcenterURL != "" {
@@ -301,9 +300,14 @@ func main() {
 		GatewayAPI:     collector.BuildDynamicSnapshots(gwGVRs, gwInformers),
 		Traefik:        collector.BuildDynamicSnapshots(trGVRs, trInformers),
 	}
-	collector.EmitFullSnapshot(rs, "init")
-
+	// Open the live-event gate before emitting the initial snapshot, not
+	// after: an event landing while the snapshot is being written is then
+	// streamed (at worst duplicating a snapshot line for the same object
+	// state) instead of being dropped until the next reconcile. The
+	// periodic reconcile snapshot has always interleaved with live events
+	// the same way.
 	synced.Store(true)
+	collector.EmitFullSnapshot(rs, "init")
 	collector.Log.Info("streaming events")
 	go collector.SnapshotLoop(ctx, rs)
 
@@ -396,6 +400,34 @@ func resolveEnvironment(rorEnv string) string {
 		return rorEnv
 	}
 	return os.Getenv("ENVIRONMENT")
+}
+
+// envFloat32 / envInt parse positive numeric tuning overrides from the
+// environment; unset, invalid, or non-positive values yield the default.
+func envFloat32(name string, def float32) float32 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 32)
+	if err != nil || v <= 0 {
+		collector.Log.Warn("invalid env override, using default", "name", name, "value", raw, "default", def)
+		return def
+	}
+	return float32(v)
+}
+
+func envInt(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		collector.Log.Warn("invalid env override, using default", "name", name, "value", raw, "default", def)
+		return def
+	}
+	return v
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {

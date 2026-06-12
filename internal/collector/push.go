@@ -22,6 +22,11 @@ const (
 	maxBackoff               = 5 * time.Minute
 	maxBufferSize            = 10_000
 	pushBatchLimit           = 2_000
+	// shutdownFlushTimeout bounds the final best-effort flush on
+	// shutdown. Without it, an unreachable SPAM holds the process for
+	// the full 30s client timeout per batch (up to 5 batches), eating
+	// the pod's termination grace.
+	shutdownFlushTimeout = 10 * time.Second
 	// snapshotCooldown caps how often an ACK-mismatch triggers a
 	// reconcile snapshot. Without it, a persistent SPAM-side gap
 	// (e.g. broken persistence) would fire a snapshot every push tick.
@@ -98,7 +103,9 @@ func PushLoop(ctx context.Context, endpoint string, cap *LineCapture, triggerSna
 	for {
 		select {
 		case <-ctx.Done():
-			_, _ = pushAll(client, endpoint, cap.Flush())
+			flushCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
+			_, _, _ = pushAll(flushCtx, client, endpoint, cap.Flush())
+			cancel()
 			return
 		case <-ticker.C:
 			if backoff > 0 {
@@ -112,15 +119,16 @@ func PushLoop(ctx context.Context, endpoint string, cap *LineCapture, triggerSna
 			if len(records) == 0 {
 				continue
 			}
-			batchHigh := scanMaxEventID(records)
-			lastSeen, ok := pushAll(client, endpoint, records)
+			lastSeen, unsent, ok := pushAll(ctx, client, endpoint, records)
 			if !ok {
-				cap.Rebuffer(records)
+				cap.Rebuffer(unsent)
 				backoff = NextBackoff(backoff)
-				Log.Warn("push failed, backing off", "retry_in", backoff, "endpoint", endpoint)
+				// LogLocal: buffering this warning would queue the push
+				// loop's own failure reports for redelivery to SPAM.
+				LogLocal.Warn("push failed, backing off", "retry_in", backoff, "endpoint", endpoint)
 				continue
 			}
-			if batchHigh > lastPushedEventID {
+			if batchHigh := scanMaxEventID(records); batchHigh > lastPushedEventID {
 				lastPushedEventID = batchHigh
 			}
 			if triggerSnapshot != nil && lastSeen != 0 &&
@@ -156,42 +164,52 @@ func scanMaxEventID(records []json.RawMessage) uint64 {
 	return maxID
 }
 
-func pushAll(client *http.Client, endpoint string, records []json.RawMessage) (uint64, bool) {
+// pushAll sends records in pushBatchLimit-sized batches. On failure it
+// returns the undelivered tail (the failed batch and everything after)
+// so the caller can rebuffer exactly that — batches already ACKed by
+// SPAM must not be resent.
+func pushAll(ctx context.Context, client *http.Client, endpoint string, records []json.RawMessage) (uint64, []json.RawMessage, bool) {
 	var lastSeen uint64
 	for len(records) > 0 {
 		batch := records
 		if len(batch) > pushBatchLimit {
 			batch = records[:pushBatchLimit]
 		}
-		records = records[len(batch):]
-		seen, ok := push(client, endpoint, batch)
+		seen, ok := push(ctx, client, endpoint, batch)
 		if !ok {
-			return lastSeen, false
+			return lastSeen, records, false
 		}
+		records = records[len(batch):]
 		if seen > lastSeen {
 			lastSeen = seen
 		}
 	}
-	return lastSeen, true
+	return lastSeen, nil, true
 }
 
-func push(client *http.Client, endpoint string, records []json.RawMessage) (uint64, bool) {
+func push(ctx context.Context, client *http.Client, endpoint string, records []json.RawMessage) (uint64, bool) {
 	if len(records) == 0 {
 		return 0, true
 	}
 	body, err := json.Marshal(records)
 	if err != nil {
-		Log.Error("push: marshal", "err", err)
+		LogLocal.Error("push: marshal", "err", err)
 		return 0, false
 	}
-	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		Log.Error("push: post", "err", err)
+		LogLocal.Error("push: build request", "err", err)
+		return 0, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		LogLocal.Error("push: post", "err", err)
 		return 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		Log.Error("push: unexpected status", "status", resp.StatusCode)
+		LogLocal.Error("push: unexpected status", "status", resp.StatusCode)
 		return 0, false
 	}
 	var ack pushAck

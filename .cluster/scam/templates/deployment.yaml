@@ -61,6 +61,18 @@ spec:
             - name: ROR_API_KEY_SECRET_KEY
               value: {{ .Values.ror.apiKeySecret.key | quote }}
             {{- end }}
+            {{- if .Values.ror.refreshInterval }}
+            - name: ROR_REFRESH_INTERVAL
+              value: {{ .Values.ror.refreshInterval | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.kubeClientQPS }}
+            - name: KUBE_CLIENT_QPS
+              value: {{ .Values.kubeClientQPS | quote }}
+            {{- end }}
+            {{- if .Values.kubeClientBurst }}
+            - name: KUBE_CLIENT_BURST
+              value: {{ .Values.kubeClientBurst | quote }}
             {{- end }}
             - name: GOGC
               value: "50"

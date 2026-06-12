@@ -14,11 +14,3 @@ var nextEventID atomic.Uint64
 func NextEventID() uint64 {
 	return nextEventID.Add(1)
 }
-
-// LastEventID returns the most-recently-issued event_id without
-// incrementing. Used by the push loop to compare against SPAM's
-// reported last_seen, but only as a fallback — the authoritative
-// "last pushed" comes from scanning the actual pushed batch.
-func LastEventID() uint64 {
-	return nextEventID.Load()
-}

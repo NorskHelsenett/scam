@@ -17,12 +17,7 @@ type svcPort struct {
 // EmitService emits a Service record. All services are included so the
 // consuming system can draw the full service → pod chain, not just
 // ingress-exposed ones.
-func EmitService(event string, s *corev1.Service) bool {
-	emitServiceRaw(event, s)
-	return true
-}
-
-func emitServiceRaw(event string, s *corev1.Service) {
+func EmitService(event string, s *corev1.Service) {
 	ports := make([]svcPort, 0, len(s.Spec.Ports))
 	for _, p := range s.Spec.Ports {
 		ports = append(ports, svcPort{
@@ -78,11 +73,6 @@ func IngressLbAddresses(in []networkingv1.IngressLoadBalancerIngress) ([]string,
 		}
 	}
 	return ips, hosts
-}
-
-// EmitServiceForce emits regardless of the "internal ClusterIP" filter.
-func EmitServiceForce(event string, s *corev1.Service) {
-	emitServiceRaw(event, s)
 }
 
 func EmitServiceDelete(s *corev1.Service) {

@@ -34,33 +34,7 @@ func IngressBackendKeys(obj any) ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
-	var keys []string
-	seen := make(map[string]struct{})
-	add := func(svcName string) {
-		if svcName == "" {
-			return
-		}
-		k := ing.Namespace + "/" + svcName
-		if _, dup := seen[k]; dup {
-			return
-		}
-		seen[k] = struct{}{}
-		keys = append(keys, k)
-	}
-	if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
-		add(ing.Spec.DefaultBackend.Service.Name)
-	}
-	for _, r := range ing.Spec.Rules {
-		if r.HTTP == nil {
-			continue
-		}
-		for _, p := range r.HTTP.Paths {
-			if p.Backend.Service != nil {
-				add(p.Backend.Service.Name)
-			}
-		}
-	}
-	return keys, nil
+	return BackendTargetsToKeys(IngressBackends(ing)), nil
 }
 
 func BackendTargetsToKeys(targets []BackendTarget) []string {
@@ -82,17 +56,20 @@ func BackendTargetsToKeys(targets []BackendTarget) []string {
 
 func IngressBackends(ing *networkingv1.Ingress) []BackendTarget {
 	var out []BackendTarget
-	if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
-		out = append(out, BackendTarget{ing.Namespace, ing.Spec.DefaultBackend.Service.Name})
+	add := func(svc *networkingv1.IngressServiceBackend) {
+		if svc != nil && svc.Name != "" {
+			out = append(out, BackendTarget{ing.Namespace, svc.Name})
+		}
+	}
+	if ing.Spec.DefaultBackend != nil {
+		add(ing.Spec.DefaultBackend.Service)
 	}
 	for _, r := range ing.Spec.Rules {
 		if r.HTTP == nil {
 			continue
 		}
 		for _, p := range r.HTTP.Paths {
-			if p.Backend.Service != nil {
-				out = append(out, BackendTarget{ing.Namespace, p.Backend.Service.Name})
-			}
+			add(p.Backend.Service)
 		}
 	}
 	return out
@@ -147,7 +124,7 @@ func RefreshBackendServices(targets []BackendTarget) {
 		if err != nil || svc == nil {
 			continue
 		}
-		EmitServiceForce("EXPOSURE", svc)
+		EmitService("EXPOSURE", svc)
 	}
 }
 
