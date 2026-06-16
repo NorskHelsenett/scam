@@ -10,8 +10,7 @@ func SplitImage(spec, imageID string) (repo, tag, digest string) {
 		digest = s[at+1:]
 		s = s[:at]
 	}
-	if slash := strings.LastIndex(s, "/"); colonAfter(s, slash) >= 0 {
-		c := colonAfter(s, slash)
+	if c := colonAfter(s, strings.LastIndex(s, "/")); c >= 0 {
 		tag = s[c+1:]
 		s = s[:c]
 	}

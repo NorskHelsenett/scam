@@ -207,28 +207,17 @@ func EmitPod(event string, p, oldP *corev1.Pod) int {
 // EmitPodDelete emits one Container DELETE per container in the pod.
 func EmitPodDelete(p *corev1.Pod) {
 	ok, on := PodOwner(p)
-	uid := string(p.UID)
-	for _, c := range p.Spec.InitContainers {
-		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "init", c.Name)
+	for _, c := range collectContainers(p) {
+		Log.Info("DELETE",
+			"kind", "Container",
+			"event_id", NextEventID(),
+			"namespace", p.Namespace,
+			"pod_uid", string(p.UID),
+			"owner_kind", ok,
+			"owner", on,
+			"pod", p.Name,
+			"container_kind", c.kind,
+			"container", c.name,
+		)
 	}
-	for _, c := range p.Spec.Containers {
-		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "main", c.Name)
-	}
-	for _, c := range p.Spec.EphemeralContainers {
-		emitContainerDelete(p.Namespace, uid, ok, on, p.Name, "ephemeral", c.Name)
-	}
-}
-
-func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname string) {
-	Log.Info("DELETE",
-		"kind", "Container",
-		"event_id", NextEventID(),
-		"namespace", ns,
-		"pod_uid", podUID,
-		"owner_kind", ownerKind,
-		"owner", ownerName,
-		"pod", podName,
-		"container_kind", ckind,
-		"container", cname,
-	)
 }

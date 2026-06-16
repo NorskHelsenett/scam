@@ -16,6 +16,13 @@ import (
 // starting informers so all emitted records carry cluster identity attrs.
 var Log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+// LogLocal mirrors Log but always writes straight to stdout, never the
+// push buffer. Use it for push-transport diagnostics so a SPAM outage
+// doesn't queue its own failure reports for redelivery to SPAM.
+// Defaults to Log; main points it at a direct stdout handler when the
+// push capture is installed.
+var LogLocal = Log
+
 // Refs holds informer references used for cross-resource lookups
 // (e.g., "is this Service referenced by any Ingress/Route?"). Populated
 // from main() after all informers are created.

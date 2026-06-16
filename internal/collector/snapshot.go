@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -157,6 +158,15 @@ func resolveSnapshotInterval() time.Duration {
 
 // --- per-kind snapshot helpers ---
 
+// uidKeys collects the resource_keys list for emitSnapshotKeys.
+func uidKeys[T metav1.Object](list []T) []string {
+	keys := make([]string, 0, len(list))
+	for _, o := range list {
+		keys = append(keys, string(o.GetUID()))
+	}
+	return keys
+}
+
 func EmitServiceSnapshot(inf coreinformers.ServiceInformer, snapshotID string) {
 	list, err := inf.Lister().List(labels.Everything())
 	if err != nil {
@@ -165,17 +175,8 @@ func EmitServiceSnapshot(inf coreinformers.ServiceInformer, snapshotID string) {
 	}
 	DumpSorted("Service", list,
 		func(a, b *corev1.Service) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
-		func(s *corev1.Service) int {
-			if EmitService("INITIAL", s) {
-				return 1
-			}
-			return 0
-		})
-	keys := make([]string, 0, len(list))
-	for _, s := range list {
-		keys = append(keys, string(s.UID))
-	}
-	emitSnapshotKeys(snapshotID, "Service", keys)
+		func(s *corev1.Service) int { EmitService("INITIAL", s); return 1 })
+	emitSnapshotKeys(snapshotID, "Service", uidKeys(list))
 }
 
 func EmitEndpointSliceSnapshot(inf discoveryinformers.EndpointSliceInformer, snapshotID string) {
@@ -189,11 +190,7 @@ func EmitEndpointSliceSnapshot(inf discoveryinformers.EndpointSliceInformer, sna
 			return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name)
 		},
 		func(es *discoveryv1.EndpointSlice) int { EmitEndpointSlice("INITIAL", es); return 1 })
-	keys := make([]string, 0, len(list))
-	for _, es := range list {
-		keys = append(keys, string(es.UID))
-	}
-	emitSnapshotKeys(snapshotID, "EndpointSlice", keys)
+	emitSnapshotKeys(snapshotID, "EndpointSlice", uidKeys(list))
 }
 
 func EmitIngressSnapshot(inf netinformers.IngressInformer, snapshotID string) {
@@ -205,11 +202,7 @@ func EmitIngressSnapshot(inf netinformers.IngressInformer, snapshotID string) {
 	DumpSorted("Ingress", list,
 		func(a, b *networkingv1.Ingress) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
 		func(i *networkingv1.Ingress) int { EmitIngress("INITIAL", i); return 1 })
-	keys := make([]string, 0, len(list))
-	for _, i := range list {
-		keys = append(keys, string(i.UID))
-	}
-	emitSnapshotKeys(snapshotID, "Ingress", keys)
+	emitSnapshotKeys(snapshotID, "Ingress", uidKeys(list))
 }
 
 func EmitIngressClassSnapshot(inf netinformers.IngressClassInformer, snapshotID string) {
@@ -221,11 +214,7 @@ func EmitIngressClassSnapshot(inf netinformers.IngressClassInformer, snapshotID 
 	DumpSorted("IngressClass", list,
 		func(a, b *networkingv1.IngressClass) bool { return a.Name < b.Name },
 		func(ic *networkingv1.IngressClass) int { EmitIngressClass("INITIAL", ic); return 1 })
-	keys := make([]string, 0, len(list))
-	for _, ic := range list {
-		keys = append(keys, string(ic.UID))
-	}
-	emitSnapshotKeys(snapshotID, "IngressClass", keys)
+	emitSnapshotKeys(snapshotID, "IngressClass", uidKeys(list))
 }
 
 func EmitGatewayAPISnapshot(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer, snapshotID string) {
@@ -233,11 +222,7 @@ func EmitGatewayAPISnapshot(gvr schema.GroupVersionResource, inf cache.SharedInd
 	kind := kindFromResource(gvr.Resource)
 	DumpSorted(kind, list, LessUnstructured,
 		func(u *unstructured.Unstructured) int { EmitGatewayAPI("INITIAL", gvr, u); return 1 })
-	keys := make([]string, 0, len(list))
-	for _, u := range list {
-		keys = append(keys, string(u.GetUID()))
-	}
-	emitSnapshotKeys(snapshotID, kind, keys)
+	emitSnapshotKeys(snapshotID, kind, uidKeys(list))
 }
 
 func EmitTraefikSnapshot(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer, snapshotID string) {
@@ -245,11 +230,7 @@ func EmitTraefikSnapshot(gvr schema.GroupVersionResource, inf cache.SharedIndexI
 	kind := traefikKindFromResource(gvr.Resource)
 	DumpSorted(kind, list, LessUnstructured,
 		func(u *unstructured.Unstructured) int { EmitTraefik("INITIAL", gvr, u); return 1 })
-	keys := make([]string, 0, len(list))
-	for _, u := range list {
-		keys = append(keys, string(u.GetUID()))
-	}
-	emitSnapshotKeys(snapshotID, kind, keys)
+	emitSnapshotKeys(snapshotID, kind, uidKeys(list))
 }
 
 func emitSnapshotKeys(snapshotID, targetKind string, keys []string) {

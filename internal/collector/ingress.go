@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"strconv"
+
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
@@ -42,7 +44,7 @@ func EmitIngress(event string, i *networkingv1.Ingress) {
 					if path.Backend.Service.Port.Name != "" {
 						pp.BackendPort = path.Backend.Service.Port.Name
 					} else if path.Backend.Service.Port.Number != 0 {
-						pp.BackendPort = Itoa(int64(path.Backend.Service.Port.Number))
+						pp.BackendPort = strconv.Itoa(int(path.Backend.Service.Port.Number))
 					}
 				} else if path.Backend.Resource != nil {
 					pp.BackendKind = path.Backend.Resource.Kind
@@ -85,7 +87,7 @@ func EmitIngressDelete(i *networkingv1.Ingress) {
 
 // --- IngressClass ---
 
-func emitIngressClass(event string, ic *networkingv1.IngressClass) {
+func EmitIngressClass(event string, ic *networkingv1.IngressClass) {
 	Log.Info(event,
 		"kind", "IngressClass",
 		"event_id", NextEventID(),
@@ -94,10 +96,6 @@ func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 		"labels", ic.Labels,
 		"controller", ic.Spec.Controller,
 	)
-}
-
-func EmitIngressClass(event string, ic *networkingv1.IngressClass) {
-	emitIngressClass(event, ic)
 }
 
 func EmitIngressClassDelete(ic *networkingv1.IngressClass) {
