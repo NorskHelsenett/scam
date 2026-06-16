@@ -122,7 +122,7 @@ func main() {
 	collector.SetClusterAttrs(clusterAttrSet(clusterName, clusterID, environment, ror))
 
 	// ---- startup banner ----------------------------------------------------
-	printBanner(clusterName, clusterID, environment, ror.Slug, callcenterURL, version, commit)
+	printBanner(clusterName, clusterID, environment, ror.Slug, ror.UID, callcenterURL, version, commit)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -328,7 +328,7 @@ func main() {
 // rorSlug is included as a separate banner line (when non-empty) so an
 // operator can tell at a glance whether the ROR binding succeeded \u2014
 // cluster_id is always the kube-system UID now and won't reveal that.
-func printBanner(clusterName, clusterID, environment, rorSlug, callcenter, version, commit string) {
+func printBanner(clusterName, clusterID, environment, rorSlug, rorUID, callcenter, version, commit string) {
 	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
 	lines := []string{
 		fmt.Sprintf("version:     %s (%s)", version, commit),
@@ -338,6 +338,11 @@ func printBanner(clusterName, clusterID, environment, rorSlug, callcenter, versi
 	}
 	if rorSlug != "" {
 		lines = append(lines, fmt.Sprintf("ror_slug:    %s", rorSlug))
+	}
+	// Only worth a line once it diverges from the slug (i.e. after ROR's
+	// identifier migration) \u2014 that's the UID SPAM matches ACL grants by.
+	if rorUID != "" && rorUID != rorSlug {
+		lines = append(lines, fmt.Sprintf("ror_uid:     %s", rorUID))
 	}
 	lines = append(lines, fmt.Sprintf("callcenter:  %s", callcenter))
 
