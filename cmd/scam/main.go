@@ -151,7 +151,7 @@ func main() {
 		// heartbeats, last_push_at only advances when we have actual
 		// events to push, so a stable cluster falls out of the live
 		// window and disappears from the UI.
-		go collector.HeartbeatLoop(ctx, base+"/api/scam/heartbeat", clusterID)
+		go collector.HeartbeatLoop(ctx, base+"/api/scam/heartbeat", clusterID, version, commit)
 	}
 
 	var synced atomic.Bool
