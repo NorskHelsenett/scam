@@ -255,14 +255,9 @@ func resolveHeartbeatInterval() time.Duration {
 //
 // Failures never affect anything outside this goroutine — the cluster
 // the agent is running in is unaffected by an unreachable SPAM.
-func HeartbeatLoop(ctx context.Context, endpoint, clusterID string) {
+func HeartbeatLoop(ctx context.Context, endpoint, clusterID, version, commit string) {
 	if clusterID == "" {
 		Log.Warn("heartbeat: cluster_id empty, skipping loop")
-		return
-	}
-	body, err := json.Marshal(map[string]string{"cluster_id": clusterID})
-	if err != nil {
-		Log.Error("heartbeat: marshal", "err", err)
 		return
 	}
 	client := &http.Client{Timeout: heartbeatTimeout}
@@ -284,6 +279,14 @@ func HeartbeatLoop(ctx context.Context, endpoint, clusterID string) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		}
+
+		// Rebuild each tick so the metrics snapshot is current.
+		body, err := buildHeartbeatBody(clusterID, version, commit)
+		if err != nil {
+			Log.Error("heartbeat: marshal body", "err", err)
+			timer.Reset(interval)
+			continue
 		}
 
 		if err := sendHeartbeat(ctx, client, endpoint, body); err != nil {
