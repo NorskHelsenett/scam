@@ -1,0 +1,176 @@
+name: Release
+
+# CHANGELOG-driven release. On every push to main (i.e. a merged PR), read
+# the top version in CHANGELOG.md. If no tag exists for it yet, this is a
+# new release: build the stable image, create the tag + GitHub Release with
+# that CHANGELOG section as the notes, and publish the stable Helm chart.
+#
+# You never create tags by hand — bump CHANGELOG.md in a PR, merge it, and
+# CI tags + releases from the version you wrote. No drift: the tag IS the
+# top CHANGELOG version.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.v.outputs.should_release }}
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Detect release version from CHANGELOG
+        id: v
+        run: |
+          # Top "## [X.Y.Z]" (or "## X.Y.Z") header in CHANGELOG.md.
+          VER=$(grep -m1 -oE '^##[[:space:]]+\[?[0-9]+\.[0-9]+\.[0-9]+\]?' CHANGELOG.md \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+          if [ -z "$VER" ]; then
+            echo "::error::No '## [X.Y.Z]' version header found at the top of CHANGELOG.md"
+            exit 1
+          fi
+          TAG="v${VER}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New release detected: ${TAG}"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      semver: ${{ needs.detect.outputs.tag }}
+    secrets: inherit
+
+  release:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          # Print everything between this version's header and the next
+          # version header (or EOF).
+          awk -v ver="$VERSION" '
+            $0 ~ "^##[[:space:]]+\\[?" ver "\\]?" { capture=1; next }
+            capture && $0 ~ "^##[[:space:]]+\\[?[0-9]+\\.[0-9]+\\.[0-9]+" { exit }
+            capture {
+              if (!started && $0 ~ /^[[:space:]]*$/) next   # drop leading blanks
+              started=1; print
+            }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::No release notes found for ${VERSION} in CHANGELOG.md"
+            exit 1
+          fi
+          echo "----- release notes -----"; cat notes.md
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "$TAG" \
+            --notes-file notes.md
+
+  helm:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.detect.outputs.tag }}
+      CHART_VERSION: ${{ needs.detect.outputs.version }}
+      REGISTRY_IMAGE: ${{ needs.build.outputs.image }}
+      IMAGE_VERSION: ${{ needs.build.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78 # v3
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Log in to Helm Registry
+        run: |
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+
+      - name: Determine Helm repository
+        id: helm-repo
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+      - name: Update and push Helm chart
+        env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
+          HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
+        run: |
+          CHART_DIR=".cluster/scam"
+          OCI_NAME="helm"
+
+          echo "RELEASE: tag=${RELEASE_TAG} chart=${CHART_VERSION}"
+
+          # appVersion carries the human v-prefixed tag; chart version is
+          # the bare SemVer (the CHANGELOG version).
+          yq e -i ".name = \"$OCI_NAME\" | .version = \"$CHART_VERSION\" | .appVersion = \"$RELEASE_TAG\"" ${CHART_DIR}/Chart.yaml
+
+          # Pin the image at the exact tag@digest this release produced.
+          IMAGE_TAG="${IMAGE_VERSION}@${IMAGE_DIGEST}"
+          yq e -i ".image.repository = \"$REGISTRY_IMAGE\"" ${CHART_DIR}/values.yaml
+          yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
+
+          # helm appends the chart name from Chart.yaml, so pushing to
+          # oci://registry/org/scam with name=helm lands at scam/helm.
+          helm package ${CHART_DIR}
+          helm push "${OCI_NAME}-${CHART_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}

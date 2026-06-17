@@ -1,0 +1,62 @@
+name: Changelog Check
+
+# Guard for PRs into main: every PR must introduce a NEW release section in
+# CHANGELOG.md. The top "## [X.Y.Z]" version must
+#   (a) not already exist as a release tag (no overwriting a release), and
+#   (b) be strictly greater than the version currently on main (a real bump).
+# Make this a required status check so a PR can't merge without it.
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Require a new, unreleased CHANGELOG version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          top_version() {
+            grep -m1 -oE '^##[[:space:]]+\[?[0-9]+\.[0-9]+\.[0-9]+\]?' \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+          }
+
+          VER=$(top_version < CHANGELOG.md)
+          if [ -z "$VER" ]; then
+            echo "::error::No '## [X.Y.Z]' version header found at the top of CHANGELOG.md."
+            exit 1
+          fi
+          TAG="v${VER}"
+
+          # (a) Must not already be released.
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::CHANGELOG top version ${VER} is already released (${TAG}). Add a new '## [X.Y.Z]' section for this change."
+            exit 1
+          fi
+
+          # (b) Must be a real bump over main (and strictly greater).
+          BASE_VER=$(git show "${BASE_SHA}:CHANGELOG.md" 2>/dev/null | top_version)
+          if [ -n "$BASE_VER" ]; then
+            if [ "$VER" = "$BASE_VER" ]; then
+              echo "::error::CHANGELOG top version is still ${VER} (unchanged from main). Add a new section and bump the version."
+              exit 1
+            fi
+            HIGHEST=$(printf '%s\n%s\n' "$VER" "$BASE_VER" | sort -V | tail -n1)
+            if [ "$HIGHEST" != "$VER" ]; then
+              echo "::error::CHANGELOG top version ${VER} must be greater than the released ${BASE_VER} on main."
+              exit 1
+            fi
+          fi
+
+          echo "OK: ${TAG} is a new, unreleased version (main is at ${BASE_VER:-none})."
