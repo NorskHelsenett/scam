@@ -50,17 +50,17 @@ var httpClient = &http.Client{Timeout: rorLookupTimeout}
 // kube-system namespace UID, resolved in main. The ROR fields are ACL/
 // display metadata emitted under ror_metadata.
 type rorIdentity struct {
-	// UID is V2 Self().User.Name — the ROR apikey identifier, which is the
-	// value ROR keys ACL grants by. After ROR's identifier migration this
-	// is the cluster UUID; before it, the slug. Emitted as
-	// ror_metadata.cluster_uid; this is the identifier SPAM matches ACL
-	// grants against, so it must always be carried.
+	// UID is V2 /v2/self user.uid — the cluster's stable ROR UUID. This is
+	// the identifier ROR keys ACL grants by post identifier-migration, so
+	// SPAM matches grants against it; it must always be carried. Emitted as
+	// ror_metadata.cluster_uid. Falls back to the /v2/self user.name (the
+	// slug) against older ROR servers that don't yet return user.uid, so
+	// cluster_uid is never empty.
 	UID string
 	// Slug is /v1/clusters/<id>.clusterId — the human-readable ROR slug
-	// (e.g. "t-sb-001-sq40"). It survives the identifier migration, so it
-	// stays a stable display/search value even once UID becomes a UUID.
-	// Emitted as ror_metadata.cluster_id. Falls back to UID when the
-	// cluster lookup can't supply it (preserves pre-migration behaviour).
+	// (e.g. "t-sb-001-sq40"). It stays a stable display/search value
+	// alongside the UUID. Emitted as ror_metadata.cluster_id. Falls back to
+	// the /v2/self user.name when the cluster lookup can't supply it.
 	Slug        string
 	Name        string // /v1/clusters/<id>.clusterName — human-friendly display name
 	Environment string // /v1/clusters/<id>.environment
@@ -74,11 +74,11 @@ func rorEndpoint() string { return strings.TrimSpace(os.Getenv(envRorAPIEndpoint
 // nested group, emitted only when the ROR lookup succeeded. SPAM joins
 // on top-level cluster_id (kube-system UID) regardless; the ror_metadata
 // fields let it map the cluster onto ROR's ACL/display:
-//   - cluster_uid: the ROR apikey identifier (UUID after ROR's
-//     identifier migration). This is what ROR keys ACL grants by, so
-//     SPAM matches grants against it — it must always be present.
+//   - cluster_uid: the cluster's ROR UUID (/v2/self user.uid). This is
+//     what ROR keys ACL grants by, so SPAM matches grants against it —
+//     it must always be present.
 //   - cluster_id: the human-readable ROR slug, kept distinct from the
-//     UID so the slug survives for display/search after the migration.
+//     UID so the slug survives for display/search alongside the UUID.
 func clusterAttrSet(clusterName, clusterID, environment string, ror rorIdentity) []slog.Attr {
 	var attrs []slog.Attr
 	if clusterName != "" {
@@ -180,27 +180,35 @@ func resolveRorRefreshInterval() time.Duration {
 }
 
 // fetchRorIdentity resolves the cluster's ROR identity in two hops:
-// V2 Self() for the apikey identifier — the UID ROR keys ACL grants by,
-// plus the Type=Cluster assertion — then /v1/clusters/<id> for the
-// human slug, display name, and environment (Self()'s response shape
-// carries none of those). Returns a zero value when Self() fails.
+// V2 Self() for the cluster UUID (user.uid — the identifier ROR keys ACL
+// grants by) and the slug (user.name), plus the Type=Cluster assertion —
+// then /v1/clusters/<id> for the display name and environment (Self()'s
+// response carries neither). Returns a zero value when Self() fails.
 func fetchRorIdentity(endpoint, apikey string) rorIdentity {
-	uid := rorSelfLookup(endpoint, apikey)
-	if uid == "" {
+	name, uid := rorSelfLookup(endpoint, apikey)
+	if name == "" {
 		return rorIdentity{}
 	}
-	slug, name, env := rorClusterLookup(endpoint, apikey, uid)
+	if uid == "" {
+		// Older ROR servers don't return user.uid yet — keep the slug as
+		// the UID too, so ror_metadata.cluster_uid is never empty and we
+		// never regress below the prior "uid = Self().Name" behaviour.
+		uid = name
+	}
+	slug, displayName, env := rorClusterLookup(endpoint, apikey, name)
 	if slug == "" {
 		// /v1/clusters didn't answer (or carried no clusterId) — keep the
-		// ACL identity as the slug too, so ror_metadata.cluster_id is never
-		// empty and we never regress below the prior "slug = Self().Name"
-		// behaviour.
-		slug = uid
+		// self slug, so ror_metadata.cluster_id is never empty.
+		slug = name
 	}
-	return rorIdentity{UID: uid, Slug: slug, Name: name, Environment: env}
+	return rorIdentity{UID: uid, Slug: slug, Name: displayName, Environment: env}
 }
 
-func rorSelfLookup(endpoint, apikey string) string {
+// rorSelfLookup returns the cluster's /v2/self identity: name (the slug
+// ROR shows, also the lookup key for /v1/clusters) and uid (the cluster
+// UUID ROR keys ACL grants by). uid may be empty against older ROR
+// servers. Returns empty strings when Self() fails or isn't a cluster.
+func rorSelfLookup(endpoint, apikey string) (name, uid string) {
 	auth := httpauthprovider.NewAuthProvider(httpauthprovider.AuthPoviderTypeAPIKey, apikey)
 	transport := resttransport.NewRorHttpTransport(&httpclient.HttpTransportClientConfig{
 		BaseURL:      endpoint,
@@ -215,20 +223,20 @@ func rorSelfLookup(endpoint, apikey string) string {
 	self, err := cli.V2().Self().Get(ctx)
 	if err != nil {
 		collector.Log.Warn("ror self lookup failed", "err", err)
-		return ""
+		return "", ""
 	}
 	if self.Type != identitymodels.IdentityTypeCluster {
 		collector.Log.Warn("ror apikey is not bound to a cluster identity", "type", self.Type)
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(self.User.Name)
+	return strings.TrimSpace(self.User.Name), strings.TrimSpace(self.User.Uid)
 }
 
 // rorClusterLookup hand-rolls the /v1/clusters/<id> call instead of
 // going through rorclient.V2().Resources() — the typed SDK path needs a
 // GroupVersionKind we'd have to guess at, and we only want three fields
-// off the response. id is the apikey identifier from Self() (a slug or,
-// post-migration, the UUID); ROR resolves the cluster from either.
+// off the response. id is the self slug (/v2/self user.name); ROR also
+// resolves the cluster from the UUID, but the slug is what we carry.
 // Returns the human-readable slug (clusterId), display name, and env.
 func rorClusterLookup(endpoint, apikey, id string) (slug, name, env string) {
 	url := strings.TrimRight(endpoint, "/") + "/v1/clusters/" + id
